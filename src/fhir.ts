@@ -57,6 +57,20 @@ export const EXP = "https://example.org/sql-table-logical-models";
 export const EXT = `${EXP}/StructureDefinition`;
 export const RELATION = `${EXT}/Relation`;
 export const SQL_TEXT = `${SOF}/StructureDefinition/sql-text`;
+export const SQL_CONTENT_TYPE_SYSTEM = "https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes";
+export const SQLITE_CONTENT_TYPE = "application/sql;dialect=sqlite";
+export const SQL_CONTENT_TYPE_EXTENSION = `${EXT}/sql-content-type`;
+
+export function isSqlContentType(value: Json | undefined): boolean {
+  return typeof value === "string" && /^application\/sql(?:;|$)/.test(value);
+}
+
+export function sqliteContentTypeExtension(): FhirObject {
+  return {
+    url: SQL_CONTENT_TYPE_EXTENSION,
+    valueCoding: { system: SQL_CONTENT_TYPE_SYSTEM, code: SQLITE_CONTENT_TYPE },
+  };
+}
 
 export function sqlLibrary(
   id: string,
@@ -74,9 +88,10 @@ export function sqlLibrary(
     experimental: true,
     meta: { profile: [`${SOF}/StructureDefinition/${kind === "sql-query" ? "SQLQuery" : "SQLView"}`] },
     type: { coding: [{ system: `${SOF}/CodeSystem/LibraryTypesCodes`, code: kind }] },
+    extension: [sqliteContentTypeExtension()],
     relatedArtifact: dependencies.map((d) => ({ type: "depends-on", ...d })),
     content: [{
-      contentType: "application/sql",
+      contentType: SQLITE_CONTENT_TYPE,
       data: Buffer.from(sql).toString("base64"),
       extension: [{ url: SQL_TEXT, valueString: sql }],
     }],

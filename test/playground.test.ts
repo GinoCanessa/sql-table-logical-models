@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { array, object } from "../src/fhir.js";
+import { EXT, array, extension, object } from "../src/fhir.js";
 import { readSqliteSchema } from "../src/schema.js";
 import { previewTable } from "../src/playground.js";
 import type { PlaygroundCatalog, TablePreview } from "../src/playground.js";
@@ -70,7 +70,7 @@ test("table previews quote actual identifiers instead of treating table names as
   assert.deepEqual(result.rows, [{ id: 1, value: "kept" }]);
 });
 
-test("SQL generates a portable Library which can be saved, reloaded and invoked through FHIR operations", async (t) => {
+test("SQL generates an annotated SQLite Library which can be saved, reloaded and invoked through FHIR operations", async (t) => {
   const { base } = await serverFixture(t);
   const response = await fetch(`${base}/playground/api/library`, post({
     id: "generated-query", kind: "sql-query", title: "Names by key",
@@ -81,6 +81,11 @@ test("SQL generates a portable Library which can be saved, reloaded and invoked 
   assert.equal(response.status, 200);
   const library = object(await response.json());
   const content = object(array(library.content, "content")[0]);
+  assert.equal(content.contentType, "application/sql;dialect=sqlite");
+  assert.deepEqual(extension(library, `${EXT}/sql-content-type`)?.valueCoding, {
+    system: "https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes",
+    code: "application/sql;dialect=sqlite",
+  });
   assert.equal(Buffer.from(String(content.data), "base64").toString("utf8"), "SELECT name FROM people WHERE id >= :minimum; -- final");
   assert.equal(library.url, "https://example.org/sql/Library/generated-query");
   assert.equal((await fetch(`${base}/Library/generated-query`)).status, 404);

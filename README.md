@@ -14,6 +14,8 @@ An experimental TypeScript implementation for describing SQL database tables and
 
 Generating a Library from SQL does not create a physical database view or automatically translate rows into clinical FHIR resources.
 
+Generated SQL uses `application/sql;dialect=sqlite`. Libraries and concrete logical models also carry a local `sql-content-type` extension with a Coding from `https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes`; see the [HTML documentation](docs/index.html#composition) for its wire format and legacy compatibility.
+
 ## Quick start
 
 Requires **Node.js 24.10 or later** and npm. SQLite and HTTP use built-in Node modules; there are no runtime npm dependencies. Commands below use PowerShell.

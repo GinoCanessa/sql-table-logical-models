@@ -6,7 +6,7 @@ import type { TestContext } from "node:test";
 import { Window } from "happy-dom";
 import { initializePlayground } from "../ui/app.js";
 import { serverFixture } from "./helpers.js";
-import { SOF, array, object, sqlLibrary } from "../src/fhir.js";
+import { EXT, SOF, array, extension, object, sqlLibrary } from "../src/fhir.js";
 
 async function uiFixture(t: TestContext, beforeFetch?: (path: string, init?: RequestInit) => Promise<void>) {
   const setup = await serverFixture(t);
@@ -180,7 +180,13 @@ test("editing a stored Library through the workspace preserves unrelated metadat
   original.description = "Author-supplied context";
   original.publisher = "Example publisher";
   original.meta = { profile: [`${SOF}/StructureDefinition/SQLQuery|3.0.0`, "https://example.org/custom-profile"], tag: [{ code: "curated" }] };
-  original.content = [...array(original.content, "content"), { contentType: "text/plain", data: "bm90ZXM=" }];
+  original.extension = [...array(original.extension, "extension"), { url: "https://example.org/custom-extension", valueString: "Keep me" }];
+  original.content = [
+    { contentType: "application/sql", data: Buffer.from("SELECT 0 AS portable").toString("base64") },
+    ...array(original.content, "content"),
+    { contentType: "application/sql;dialect=postgresql", data: Buffer.from("SELECT 3::integer AS postgresql").toString("base64") },
+    { contentType: "text/plain", data: "bm90ZXM=" },
+  ];
   original.relatedArtifact = [{ type: "documentation", resource: "https://example.org/notes" }];
   await fetch(`${ui.base}/Library/curated`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(original) });
   ui.click("refresh");
@@ -202,6 +208,13 @@ test("editing a stored Library through the workspace preserves unrelated metadat
   assert.equal(saved.publisher, "Example publisher");
   assert.deepEqual(array(object(saved.meta).profile, "profile"), ["https://example.org/custom-profile", `${SOF}/StructureDefinition/SQLView`]);
   assert.equal(array(saved.content, "content").length, 2);
+  assert.equal(object(array(saved.content, "content")[0]).contentType, "application/sql;dialect=sqlite");
+  assert.equal(extension(saved, "https://example.org/custom-extension")?.valueString, "Keep me");
+  assert.equal(array(saved.extension, "extension").filter((e) => object(e).url === `${EXT}/sql-content-type`).length, 1);
+  assert.deepEqual(extension(saved, `${EXT}/sql-content-type`)?.valueCoding, {
+    system: "https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes",
+    code: "application/sql;dialect=sqlite",
+  });
   assert.equal(object(array(saved.relatedArtifact, "relatedArtifact")[0]).type, "documentation");
   assert.match(Buffer.from(String(object(array(saved.content, "content")[0]).data), "base64").toString("utf8"), /Revised explanation/);
 });

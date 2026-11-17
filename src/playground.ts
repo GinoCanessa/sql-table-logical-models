@@ -1,4 +1,4 @@
-import { SOF, array, fail, object, sqlLibrary, text } from "./fhir.js";
+import { SOF, SQL_CONTENT_TYPE_EXTENSION, array, fail, isSqlContentType, object, sqlLibrary, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
 import { extractSqlText, libraryKind, singleStatement } from "./engine.js";
 import type { QueryEngine, QueryResult } from "./engine.js";
@@ -127,7 +127,11 @@ export function generateLibrary(value: unknown, baseUrl: string): Artifact {
     const sourceType = object(source.type, "source.type");
     const coding = array(sourceType.coding, "source.type.coding").filter((c) => object(c).system !== `${SOF}/CodeSystem/LibraryTypesCodes`);
     resource.type = { ...sourceType, coding: [...coding, ...array(object(generated.type).coding, "generated.type.coding")] };
-    resource.content = [...array(generated.content, "generated.content"), ...array(source.content, "source.content").filter((c) => object(c).contentType !== "application/sql")];
+    resource.extension = [
+      ...array(source.extension, "source.extension").filter((e) => object(e).url !== SQL_CONTENT_TYPE_EXTENSION),
+      ...array(generated.extension, "generated.extension"),
+    ];
+    resource.content = [...array(generated.content, "generated.content"), ...array(source.content, "source.content").filter((c) => !isSqlContentType(object(c).contentType))];
     resource.relatedArtifact = [
       ...array(source.relatedArtifact, "source.relatedArtifact").filter((a) => object(a).type !== "depends-on"),
       ...array(generated.relatedArtifact, "generated.relatedArtifact"),

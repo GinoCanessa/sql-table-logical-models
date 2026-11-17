@@ -1,6 +1,6 @@
 import { constants, DatabaseSync } from "node:sqlite";
 import type { SQLInputValue, SQLOutputValue } from "node:sqlite";
-import { EXT, SOF, SQL_TEXT, OperationError, array, extension, fail, object, text } from "./fhir.js";
+import { EXT, SOF, SQLITE_CONTENT_TYPE, SQL_TEXT, OperationError, array, extension, fail, isSqlContentType, object, text } from "./fhir.js";
 import type { Artifact, FhirObject, Json } from "./fhir.js";
 import type { RelationBinding } from "./models.js";
 import { quoteIdentifier as q } from "./schema.js";
@@ -72,8 +72,12 @@ export function singleStatement(sql: string): string {
 
 export function extractSqlText(resource: Artifact): string {
   const contents = array(resource.content, "Library.content").map((c) => object(c));
-  const content = contents.find((c) => c.contentType === "application/sql") ??
-    fail(422, "invalid", "Library requires application/sql content");
+  const content = contents.find((c) => c.contentType === SQLITE_CONTENT_TYPE) ??
+    contents.find((c) => c.contentType === "application/sql");
+  if (!content) {
+    if (contents.some((c) => isSqlContentType(c.contentType))) fail(422, "not-supported", "Library has no SQLite or default SQL content attachment");
+    fail(422, "invalid", `Library requires ${SQLITE_CONTENT_TYPE} or application/sql content`);
+  }
   if (content.url !== undefined) fail(422, "not-supported", "Remote SQL attachments are not fetched");
   const readable = extension(content, SQL_TEXT)?.valueString;
   let decoded: string | undefined;

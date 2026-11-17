@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { EXT, RELATION, fail } from "./fhir.js";
+import { EXT, RELATION, fail, sqliteContentTypeExtension } from "./fhir.js";
 import type { Artifact, FhirObject, Json } from "./fhir.js";
 import type { SqlSchema } from "./schema.js";
 import { sqliteNameKey } from "./schema.js";
@@ -118,6 +118,7 @@ export function createLogicalModels(schema: SqlSchema, options: ModelOptions = {
       description: `Schema-derived ${schema.dialect} ${table.kind}. Physical binding is local configuration, not a portable data URL.`,
       mapping: [{ identity: "sql", name: "SQLite declared storage type" }],
       extension: [
+        sqliteContentTypeExtension(),
         { url: `${EXT}/sql-name`, valueString: table.name },
         { url: `${EXT}/relation-kind`, valueCode: table.kind },
         { url: `${EXT}/sql-ddl`, valueString: table.ddl },

@@ -152,3 +152,33 @@ test("artifact persistence and SQL attachment consistency survive round trips", 
   (query as Artifact).content = [content];
   assert.throws(() => extractSql(query), /disagree/);
 });
+
+test("SQL execution prefers the SQLite attachment over default and other dialect variants regardless of order", (t) => {
+  const { engine } = fixture(t);
+  const query = sqlLibrary("variants", "SELECT 'sqlite' AS chosen", []);
+  const sqlite = object(array(query.content, "content")[0]);
+  query.content = [
+    { contentType: "application/sql", data: Buffer.from("SELECT 'default' AS chosen").toString("base64") },
+    { contentType: "application/sql;dialect=postgresql", data: Buffer.from("SELECT 'postgresql'::text AS chosen").toString("base64") },
+    sqlite,
+  ];
+  assert.equal(extractSql(query), "SELECT 'sqlite' AS chosen");
+  assert.deepEqual(engine.run(query).rows, [{ chosen: "sqlite" }]);
+  sqlite.extension = [{ url: SQL_TEXT, valueString: "SELECT 'different' AS chosen" }];
+  assert.throws(() => engine.run(query), /disagree/);
+});
+
+test("SQL execution retains legacy default attachments but rejects libraries containing only nonmatching dialects", (t) => {
+  const { engine } = fixture(t);
+  const query = sqlLibrary("legacy", "SELECT 0", []);
+  const postgresql = { contentType: "application/sql;dialect=postgresql", data: Buffer.from("SELECT 'postgresql'::text AS chosen").toString("base64") };
+  query.content = [
+    postgresql,
+    { contentType: "application/sql", extension: [{ url: SQL_TEXT, valueString: "SELECT 'legacy' AS chosen" }] },
+  ];
+  assert.deepEqual(engine.run(query).rows, [{ chosen: "legacy" }]);
+  query.content = [postgresql];
+  assert.throws(() => engine.run(query), {
+    status: 422, code: "not-supported", message: /SQLite or default SQL content/,
+  });
+});

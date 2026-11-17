@@ -3,7 +3,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { SqliteSchemaReader } from "../src/schema.js";
 import { createLogicalModels, sqliteType } from "../src/models.js";
-import { EXT, array, object } from "../src/fhir.js";
+import { EXT, array, extension, object } from "../src/fhir.js";
 import { artifact } from "../src/store.js";
 
 test("SQLite schema preserves key order, true nullability, generated columns and indexes", () => {
@@ -67,6 +67,13 @@ test("models are deterministic and preserve physical names without invalid FHIR 
     assert.equal(object(array(elements[1]!.type, "type")[0]).code, "integer64");
     assert.equal(binding.model.baseDefinition, `${EXT}/Relation`);
     assert.ok(array(binding.model.extension, "extension").some((e) => object(e).url === `${EXT}/sql-ddl`));
+    for (const { model } of first.bindings) {
+      assert.deepEqual(extension(model, `${EXT}/sql-content-type`)?.valueCoding, {
+        system: "https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes",
+        code: "application/sql;dialect=sqlite",
+      });
+    }
+    assert.equal(extension(first.resources[0]!, `${EXT}/sql-content-type`), undefined);
   } finally { db.close(); }
 });
 

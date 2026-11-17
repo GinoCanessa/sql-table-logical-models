@@ -255,7 +255,16 @@ ORDER BY v.id</code></pre>
           <h2 id="composition-title">Library, SQLView and ViewDefinition</h2>
         </div>
         <article class="card prose">
-          <p>SQL Libraries use the specification's <code>LibraryTypesCodes#sql-query</code> or <code>#sql-view</code> coding. SQL text lives in an <code>application/sql</code> attachment, as base64 <code>data</code>, the standard <code>sql-text</code> extension, or both. If both are supplied they must match exactly. Remote SQL attachments are rejected. The exported <code>sqlLibrary()</code> helper writes both representations. <a href="#source-spec">[3]</a></p>
+          <p>SQL Libraries use the specification's <code>LibraryTypesCodes#sql-query</code> or <code>#sql-view</code> coding. Generated SQL attachments declare <code>contentType = application/sql;dialect=sqlite</code>, from <code>https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes</code>. Attachment.contentType remains a primitive code, not a Coding object. SQL text lives in base64 <code>data</code>, the standard <code>sql-text</code> extension, or both. If both are supplied they must match exactly. Remote SQL attachments are rejected. The exported <code>sqlLibrary()</code> helper writes both representations. <a href="#source-spec">[3]</a> <a href="#source-content-types">[9]</a></p>
+          <p>Execution and the SQL workspace prefer a matching <code>application/sql;dialect=sqlite</code> attachment over the default <code>application/sql</code> attachment, regardless of attachment order. The default remains readable for compatibility with existing artifacts. If neither is available, a Library containing only other SQL dialects is rejected rather than translated. Generating from the SQL workspace replaces all SQL variants with one SQLite attachment; non-SQL attachments and unrelated metadata are retained.</p>
+          <p>Generated SQL Libraries and concrete table/view logical models also carry the local resource-level <code>sql-content-type</code> extension below; demo ViewDefinitions using SQLite sources include it too. This exposes the dialect even for models with DDL but no SQL attachment. The abstract Relation base is dialect-neutral and is not annotated. Imported/stored resources are not automatically rewritten; re-save a Library through the SQL workspace to update its SQL annotation.</p>
+          <pre tabindex="0" role="region" aria-label="SQLite dialect annotation"><code>"extension": [{
+  "url": "https://example.org/sql-table-logical-models/StructureDefinition/sql-content-type",
+  "valueCoding": {
+    "system": "https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes",
+    "code": "application/sql;dialect=sqlite"
+  }
+}]</code></pre>
           <pre tabindex="0" role="region" aria-label="Dependency metadata example"><code>"relatedArtifact": [
   {
     "type": "depends-on",
@@ -369,6 +378,7 @@ ORDER BY v.id</code></pre>
               <caption>Wire representations used by this prototype</caption>
               <thead><tr><th scope="col">Name / placement</th><th scope="col">Value</th><th scope="col">Meaning</th></tr></thead>
               <tbody>
+                <tr><td>sql-content-type / SQL Library, concrete model or demo ViewDefinition</td><td>valueCoding</td><td>SQL dialect/content type: system https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes, code application/sql;dialect=sqlite. A local extension, not an upstream SQL-on-FHIR Extension profile.</td></tr>
                 <tr><td>sql-name / model or column</td><td>valueString</td><td>Unmodified physical SQL identifier.</td></tr>
                 <tr><td>relation-kind / model</td><td>valueCode</td><td>table or view.</td></tr>
                 <tr><td>sql-ddl / model</td><td>valueString</td><td>Original CREATE text from sqlite_schema.</td></tr>
@@ -420,6 +430,7 @@ ORDER BY v.id</code></pre>
             <li id="source-sqlite"><strong>[6] SQLite semantics.</strong> <a href="https://sqlite.org/datatype3.html">Datatypes and affinity</a>, <a href="https://sqlite.org/lang_createtable.html">CREATE TABLE</a> and <a href="https://sqlite.org/pragma.html">PRAGMA documentation</a>. Basis for affinity precedence, rowid alias versus nullable primary keys and catalog interpretation.</li>
             <li id="source-chat"><strong>[7] Linked Zulip discussion.</strong> <a href="https://chat.fhir.org/#narrow/channel/179219-analytics-on-FHIR/topic/External.20tables.20.2F.20relations.20in.20SQL.20on.20FHIR/with/639226061">External tables / relations in SQL on FHIR</a>. The web fetch returned only the client loading/error shell. The conversation was not independently verified; no claim here relies on an unseen message. The gist's quotations are attributed to the gist.</li>
             <li id="source-style"><strong>[8] Documentation styling.</strong> Local <code>E:\ai\git\devskills\.github\skills\dev-explore\references\html-contract.md</code> and bundled assets. Adapted editorial rail, cards, static delivery, native System/Light/Dark control, visible storage failures, narrow-screen navigation and print layout. Custom main accent <code>#525ebb</code>; a lighter indigo is used for dark-theme text contrast.</li>
+            <li id="source-content-types"><strong>[9] SQL content-type terminology and dialect selection.</strong> SQL on FHIR 2.1.0-pre continuous build: <a href="https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/CodeSystem-SQLContentTypeCodes.html">SQL Content Type Codes</a> and <a href="https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/StructureDefinition-SQLQuery.html">SQL Query Library</a>. Defines the SQLContentTypeCodes canonical, the SQLite content-type code, and matching-dialect then default attachment selection. The resource-level dialect extension used here is a project convention, not a published extension from that guide.</li>
           </ol>
           <p>Implementation-specific claims are grounded in the checked-in TypeScript and synthetic fixtures. Starter counts are a local metadata observation, not a guarantee about future copies of that database. No clinical or private row data was used in the documentation.</p>
         </article>
