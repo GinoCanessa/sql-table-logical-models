@@ -1,0 +1,13 @@
+{
+  "resourceType": "Parameters",
+  "parameter": [
+    {
+      "name": "subject",
+      "part": [
+        { "name": "name", "valueString": "patient-visits" },
+        { "name": "subjectReference", "valueReference": { "reference": "Library/patient-visits" } }
+      ]
+    },
+    { "name": "_format", "valueCode": "csv" }
+  ]
+}

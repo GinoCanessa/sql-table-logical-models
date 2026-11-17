@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en" data-theme-key="sql-table-logical-models">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>SQL logical models playground</title>
+  <script src="/docs/theme.js"></script>
+  <link rel="stylesheet" href="/docs/theme.css">
+  <link rel="stylesheet" href="/playground/playground.css">
+  <script type="module" src="/playground/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to workspace</a>
+  <header class="play-header">
+    <a class="brand" href="/playground/"><span class="brand-mark" aria-hidden="true">SQL</span><span><strong>Logical models</strong><small>Interactive playground</small></span></a>
+    <nav aria-label="Application"><a href="/docs/">Documentation</a><a href="/metadata">Capabilities</a><button type="button" id="refresh">Refresh catalog</button></nav>
+    <div class="theme-control" id="theme-control" hidden>
+      <label for="theme-choice">Appearance</label>
+      <select id="theme-choice"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+    </div>
+  </header>
+  <div class="play-shell">
+    <p class="theme-status" id="theme-status" role="status" hidden></p>
+    <noscript><p class="notice warning">The playground needs JavaScript. The documentation and JSON API remain available through the links above.</p></noscript>
+    <div class="play-intro"><div><p class="eyebrow">SQLite / SQL on FHIR / experimental</p><h1>Explore, compose, execute.</h1></div><p id="catalog-summary">Connecting to the local server...</p></div>
+    <p class="play-status" id="status" role="status" aria-live="polite">Loading catalog...</p>
+    <section class="notice warning" id="error-panel" role="alert" hidden><h2>Request failed</h2><p id="error-message"></p><pre id="error-detail" tabindex="0" aria-label="Error details"></pre></section>
+    <div class="play-layout">
+      <aside class="play-panel catalog-panel" aria-label="Database and artifact browser">
+        <h2>Browse</h2>
+        <label for="browser-kind">Catalog</label>
+        <select id="browser-kind">
+          <option value="relations">Tables and views</option>
+          <option value="StructureDefinition">Logical models</option>
+          <option value="Library">Libraries / SQLViews</option>
+          <option value="ViewDefinition">ViewDefinitions</option>
+        </select>
+        <label for="catalog-search">Filter by name or canonical</label>
+        <input id="catalog-search" type="search" placeholder="Find a table or artifact" autocomplete="off">
+        <p class="help" id="catalog-count"></p>
+        <div id="catalog-list" class="catalog-list"></div>
+        <p class="help">Browsing metadata does not read rows. Table previews and SQL runs are explicit, read-only actions.</p>
+      </aside>
+      <main id="main" tabindex="-1">
+        <nav class="workspace-nav" aria-label="Workspace areas">
+          <button type="button" data-pane="explore" aria-pressed="true">Explorer</button>
+          <button type="button" data-pane="sql" aria-pressed="false">SQL workspace</button>
+          <button type="button" data-pane="operations" aria-pressed="false">FHIR operations</button>
+        </nav>
+        <section id="explore-pane" class="workspace-pane" aria-label="Explorer">
+          <article id="explore-empty" class="play-panel"><h2>Your database, described.</h2><p>Select a table to inspect its columns, DDL and logical model, or select an artifact to view its FHIR JSON.</p><p>Use the SQL workspace to create SQLQuery or SQLView Libraries. Existing operations are available in the FHIR console.</p></article>
+          <article id="table-inspector" class="play-panel" hidden>
+            <p class="eyebrow" id="table-kind"></p><h2 id="table-title"></h2><p class="canonical" id="table-canonical"></p>
+            <div class="toolbar"><button type="button" id="table-start-sql" class="primary">Start SQL query</button><button type="button" id="table-add-dependency">Add SQL dependency</button><button type="button" id="table-show-model">View logical model</button></div>
+            <h3>Columns</h3><div id="table-columns" class="table-scroll" tabindex="0" role="region" aria-label="Table schema"></div>
+            <details><summary>CREATE statement and relationship metadata</summary><pre id="table-ddl" tabindex="0" aria-label="CREATE statement"></pre><pre id="table-keys" tabindex="0" aria-label="Keys and indexes"></pre></details>
+            <h3>Row preview</h3>
+            <div class="toolbar">
+              <label for="table-limit">Page size</label><input id="table-limit" class="number-input" type="number" min="1" max="100" value="25">
+              <button type="button" id="preview-table" class="primary">Load rows</button>
+              <button type="button" id="table-previous" disabled>Previous</button><button type="button" id="table-next" disabled>Next</button>
+            </div>
+            <p class="help" id="table-page-status">Rows are not loaded until requested.</p><div id="table-rows"></div>
+          </article>
+          <article id="artifact-inspector" class="play-panel" hidden>
+            <p class="eyebrow" id="artifact-kind"></p><h2 id="artifact-title"></h2><p class="canonical" id="artifact-canonical"></p>
+            <p class="help" id="artifact-notice"></p>
+            <div class="toolbar"><button type="button" id="artifact-load-sql">Load into SQL workspace</button><button type="button" id="artifact-use-operation">Use in FHIR operations</button><button type="button" id="artifact-save" class="primary">Save changes</button><button type="button" id="artifact-download">Download JSON</button></div>
+            <label for="artifact-json">FHIR artifact JSON</label><textarea id="artifact-json" class="code-editor" rows="26" spellcheck="false"></textarea>
+          </article>
+        </section>
+        <section id="sql-pane" class="workspace-pane" aria-labelledby="sql-title" hidden>
+          <article class="play-panel">
+            <div class="panel-heading"><div><p class="eyebrow">SQL to FHIR Library</p><h2 id="sql-title">SQL workspace</h2></div><button type="button" id="new-query">New query</button></div>
+            <p class="help">Generate SQLQuery or SQLView Libraries, not FHIR clinical resources. SQL execution uses the same read-only engine as <code>$sql-run</code>.</p>
+            <div class="form-grid">
+              <div><label for="library-id">Artifact ID</label><input id="library-id" value="playground-query" maxlength="64" pattern="[A-Za-z0-9.-]+"></div>
+              <div><label for="library-kind">Library type</label><select id="library-kind"><option value="sql-query">SQLQuery</option><option value="sql-view">SQLView (reusable dependency)</option></select></div>
+              <div><label for="library-title">Title (optional)</label><input id="library-title" placeholder="A useful name for this query"></div>
+              <div><label for="library-version">Version (optional)</label><input id="library-version" placeholder="1.0.0"></div>
+            </div>
+            <label for="library-url">Canonical URL (blank uses the configured base)</label><input id="library-url" type="url" placeholder="Loading canonical base...">
+            <details open><summary>Relation and view dependencies</summary>
+              <p class="help">SQL uses the labels below as table names. Choose a table/model, SQLView or ViewDefinition. Physical table names also work, but dependencies make the Library portable.</p>
+              <div class="dependency-picker"><label class="sr-only" for="dependency-source">Dependency artifact</label><select id="dependency-source"></select><button type="button" id="add-dependency">Add dependency</button></div>
+              <div id="dependencies"></div>
+            </details>
+            <label for="sql-editor">SQL statement</label><textarea id="sql-editor" class="code-editor sql-editor" rows="12" spellcheck="false">SELECT 1 AS example;</textarea>
+            <details><summary>Query parameters</summary>
+              <p class="help">Declarations are a Library.parameter array. For example: <code>[{"name":"minimum_cost","type":"decimal","use":"in","min":0,"max":"1"}]</code>. Use <code>:minimum_cost</code> in SQL.</p>
+              <label for="parameter-declarations">Parameter declarations (JSON array)</label><textarea id="parameter-declarations" class="code-editor" rows="5" spellcheck="false">[]</textarea>
+              <label for="sql-parameters">Input values (FHIR Parameters)</label><textarea id="sql-parameters" class="code-editor" rows="6" spellcheck="false">{"resourceType":"Parameters","parameter":[]}</textarea>
+            </details>
+            <div class="toolbar"><label for="sql-limit">Result row limit</label><input id="sql-limit" class="number-input" type="number" min="0" value="100"><button type="button" id="run-sql" class="primary">Run SQL</button><button type="button" id="generate-library">Generate Library</button><button type="button" id="save-library">Save Library</button><button type="button" id="sql-to-operation">Use in FHIR operations</button></div>
+            <p class="help">Generate does not execute or save SQL. Save persists only the artifact; it does not create a physical SQL view. Running checks dependencies, bindings and read-only SQL.</p>
+          </article>
+          <article class="play-panel"><h2>Query results</h2><p id="sql-result-status" class="help">No query run yet.</p><div id="sql-results"></div></article>
+          <article class="play-panel"><div class="panel-heading"><h2>Generated FHIR artifact</h2><button type="button" id="generated-download" disabled>Download JSON</button></div><label for="generated-json">SQLQuery / SQLView Library JSON</label><textarea id="generated-json" class="code-editor" rows="18" readonly spellcheck="false" placeholder="Generate a Library to inspect its JSON."></textarea></article>
+        </section>
+        <section id="operations-pane" class="workspace-pane" aria-labelledby="operations-title" hidden>
+          <article class="play-panel">
+            <p class="eyebrow">The actual FHIR operation endpoints</p><h2 id="operations-title">FHIR operations console</h2>
+            <div class="form-grid">
+              <div><label for="operation-kind">Operation</label><select id="operation-kind"><option value="sql-run">$sql-run</option><option value="sql-export">$sql-export</option></select></div>
+              <div><label for="operation-subject-kind">Subject form</label><select id="operation-subject-kind"><option value="workspace">Current SQL workspace (inline)</option><option value="reference">Stored reference</option><option value="canonical">Canonical URL</option><option value="inline">Inline FHIR artifact</option></select></div>
+            </div>
+            <div id="reference-subject" hidden><label for="operation-reference">Stored Library or ViewDefinition</label><select id="operation-reference"></select></div>
+            <div id="canonical-subject" hidden><label for="operation-canonical">Subject canonical (optionally |version)</label><input id="operation-canonical" type="url"></div>
+            <div id="inline-subject" hidden><label for="operation-inline">Inline Library or ViewDefinition JSON</label><textarea id="operation-inline" class="code-editor" rows="12" spellcheck="false"></textarea></div>
+            <div class="form-grid">
+              <div><label for="operation-format">Output format</label><select id="operation-format"><option value="json">JSON</option><option value="ndjson">NDJSON</option><option value="csv">CSV</option></select></div>
+              <div id="run-limit-field"><label for="operation-limit">Row limit ($sql-run only)</label><input id="operation-limit" type="number" min="0" value="100"></div>
+              <div id="export-name-field" hidden><label for="operation-export-name">Export output name</label><input id="operation-export-name" value="playground-output"></div>
+              <div id="tracking-field" hidden><label for="operation-tracking">Client tracking ID (optional)</label><input id="operation-tracking"></div>
+            </div>
+            <div class="toolbar"><label class="check"><input id="operation-header" type="checkbox" checked> CSV header</label><label id="envelope-field" class="check"><input id="operation-envelope" type="checkbox"> FHIR Binary response envelope</label></div>
+            <details><summary>Parameters and supporting context</summary>
+              <label for="operation-parameters">Input values (FHIR Parameters; Library subjects only)</label><textarea id="operation-parameters" class="code-editor" rows="6" spellcheck="false">{"resourceType":"Parameters","parameter":[]}</textarea>
+              <label for="operation-context">Inline context (JSON array)</label><textarea id="operation-context" class="code-editor" rows="6" spellcheck="false">[]</textarea>
+            </details>
+            <div class="toolbar"><button type="button" id="build-operation">Build request</button><button type="button" id="send-operation" class="primary">Send operation</button><label class="check"><input id="use-edited-request" type="checkbox"> Send edited JSON below instead of form values</label></div>
+            <p class="help">The builder handles one export subject. For multiple subjects or additional supported parameters, edit the request JSON and enable &ldquo;Send edited JSON&rdquo;.</p>
+            <pre id="operation-http" tabindex="0" aria-label="Operation HTTP request">POST /$sql-run</pre>
+            <label for="operation-request">FHIR Parameters request body</label><textarea id="operation-request" class="code-editor" rows="16" spellcheck="false" placeholder="Build a request or paste a Parameters resource."></textarea>
+          </article>
+          <article class="play-panel"><h2>Operation response</h2><p id="operation-response-status" class="help">No operation sent yet.</p>
+            <div class="toolbar" id="export-controls" hidden><button type="button" id="check-export">Check export status</button><button type="button" id="delete-export">Cancel / delete export</button></div>
+            <p class="help" id="export-location"></p><div id="export-downloads" class="toolbar"></div>
+            <div id="operation-results"></div><pre id="operation-response" tabindex="0" aria-label="Raw operation response"></pre>
+          </article>
+        </section>
+      </main>
+    </div>
+    <footer><p>Trusted local exploration only. The source database is read-only, but SQL can access any source table. Queries run synchronously; row limits are not execution-time limits. Schema is refreshed on server restart.</p></footer>
+  </div>
+</body>
+</html>

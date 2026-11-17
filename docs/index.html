@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en" data-palette="indigo" data-theme-key="sql-table-logical-models">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An executable exploration of SQLite tables as logical models, composed with SQL-on-FHIR Libraries, queries and views.">
+  <meta name="referrer" content="no-referrer">
+  <title>SQL tables as logical models</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <aside class="sidebar" aria-label="Documentation navigation">
+    <a class="brand" href="#overview">
+      <span class="brand-mark" aria-hidden="true">SQL</span>
+      <span><strong>Tables as models</strong><small>Executable exploration</small></span>
+    </a>
+    <p class="rail-label">In this document</p>
+    <nav class="nav" aria-label="Sections">
+      <a href="#overview">Overview</a>
+      <a href="#quickstart">Run it locally</a>
+      <a href="#playground">Interactive playground</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#models">Model contract</a>
+      <a href="#types">SQLite type mapping</a>
+      <a href="#relationships">Keys and joins</a>
+      <a href="#composition">Libraries and views</a>
+      <a href="#api">Server operations</a>
+      <a href="#starter">The starter database</a>
+      <a href="#decisions">Decisions and extensions</a>
+      <a href="#limits">Limits and next steps</a>
+      <a href="#sources">Sources</a>
+    </nav>
+    <p class="sidebar-note">Schema, not sampled values.<br>Experimental, not a standard.</p>
+  </aside>
+  <div class="shell">
+    <header class="topbar">
+      <span class="eyebrow">SQLite first / TypeScript / SQL on FHIR</span>
+      <div class="theme-control" id="theme-control" hidden>
+        <label for="theme-choice">Appearance</label>
+        <select id="theme-choice">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+    </header>
+    <p class="theme-status" id="theme-status" role="status" hidden></p>
+    <noscript><p class="notice">Appearance follows your system. All documentation and navigation work without scripting.</p></noscript>
+    <main id="main" tabindex="-1">
+      <section class="hero" id="overview" aria-labelledby="document-title">
+        <div>
+          <p class="eyebrow">Implementation and design notebook</p>
+          <h1 id="document-title">SQL tables.<br><em>Logical identities.</em></h1>
+          <p>Describe each table or view with a flat logical model. Bind its canonical URL to a local relation. Compose it with SQLView and SQLQuery Libraries using ordinary SQL joins.</p>
+          <a href="#quickstart">Run the synthetic example</a>
+        </div>
+        <div class="hero-aside">
+          <span class="eyebrow">Keep both truths</span>
+          <p>The logical model helps tools discover columns and relationships. The declared SQL type and original DDL remain authoritative storage metadata.</p>
+          <small>Exploration snapshot: 17 November 2026</small>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="status-title">
+        <div class="notice warning">
+          <strong id="status-title">External relations are still a proposal.</strong>
+          <p>Issue 426 explicitly excludes them from SQL on FHIR 3.0.0. This repository implements a local experiment, not an adopted Relation profile or a complete FHIR server. All new relation metadata uses a project namespace, never an invented HL7 canonical. <a href="#source-issue">[1]</a></p>
+        </div>
+      </section>
+
+      <section class="section" id="quickstart" aria-labelledby="quickstart-title">
+        <div class="section-heading">
+          <p class="eyebrow">Start without private data</p>
+          <h2 id="quickstart-title">Run it locally</h2>
+          <p>Requires Node.js 24.10 or later and npm. Node supplies SQLite and HTTP; there are no runtime npm dependencies. Commands below use PowerShell.</p>
+        </div>
+        <article class="card prose">
+          <h3>Synthetic clinic</h3>
+          <pre tabindex="0" role="region" aria-label="Install and run commands"><code>npm ci
+npm run demo
+npm start -- --database .\.data\demo.sqlite</code></pre>
+          <p>The demo creates two patients, three visits, a native SQLite view and three stored artifacts. It refuses to overwrite an existing demo database. The server binds to <code>127.0.0.1:3000</code>. Open the <a href="http://127.0.0.1:3000/playground/">interactive playground</a> to explore it; this documentation remains available at <code>http://127.0.0.1:3000/docs/</code>. Substitute your configured port when different.</p>
+          <pre tabindex="0" role="region" aria-label="Execute synthetic queries"><code>curl.exe 'http://127.0.0.1:3000/$sql-run?subjectReference=Library/patient-visits&amp;_format=json'
+
+curl.exe -X POST 'http://127.0.0.1:3000/$sql-run' `
+  -H 'Content-Type: application/fhir+json' `
+  --data-binary '@examples\run.json'</code></pre>
+          <p>The POST binds <code>minimum_cost = 25</code> and returns only visit 10, with cost 40.5. The query follows a ViewDefinition projection, an active-patient SQLView and the physical visit table. All records are synthetic.</p>
+          <h3>Describe the supplied database</h3>
+          <pre tabindex="0" role="region" aria-label="Starter derivation and server commands"><code>npm run derive -- --database .\temp\fhir-comparison.sqlite `
+  --base https://example.org/comparison `
+  --out .\.data\comparison-models.json
+
+npm start -- --database .\temp\fhir-comparison.sqlite `
+  --base https://example.org/comparison `
+  --artifacts .\.data\comparison-artifacts.sqlite</code></pre>
+          <p>Derivation opens the source read-only and reads schema metadata, not records. Output includes the local abstract base plus one model per table/view. <code>--out</code> creates a new file only; omit it to write JSON to stdout through the compiled CLI. Keep canonical bases consistent between derivation and serving. Use a separate artifact store per source database.</p>
+          <p><strong>The artifact store is SQLite, not the derived JSON Bundle.</strong> Pass a new <code>.sqlite</code> filename to <code>--artifacts</code>; the server creates it and regenerates source logical models directly from <code>--database</code>.</p>
+          <p><code>temp/</code>, <code>.data/</code>, dependencies and build output are gitignored. Neither the supplied SQLite file nor its generated schema is needed to run the synthetic example. Generated metadata may itself be sensitive; do not commit a private schema accidentally.</p>
+          <h3>Development commands</h3>
+          <pre tabindex="0" role="region" aria-label="Build and test commands"><code>npm run typecheck
+npm test
+npm run build
+node .\dist\src\cli.js --help</code></pre>
+          <p>Scripts build the TypeScript implementation before execution. The package exports its reusable API through <code>dist/src/index.js</code> after a build.</p>
+        </article>
+      </section>
+
+      <section class="section" id="playground" aria-labelledby="playground-title">
+        <div class="section-heading">
+          <p class="eyebrow">From discovery to execution</p>
+          <h2 id="playground-title">Interactive playground</h2>
+          <p>The running server serves a browser workbench at <code>/playground/</code>. It uses the existing JSON API and requires no frontend framework or separate development server. The root and <code>/metadata</code> remain CapabilityStatement endpoints.</p>
+        </div>
+        <article class="card prose">
+          <h3>Browse tables and artifacts</h3>
+          <p>Choose tables/views, logical models, Libraries or ViewDefinitions in the left catalog, then filter by name or canonical. Table selection shows schema, key/index metadata, DDL and the generated model identity without reading rows. Load rows explicitly for bounded pages of at most 100 rows, further limited by the server execution ceiling. Primary keys define preview order; relations without a declared primary key have unspecified order. A full page enables Next even when the following page may be empty. This is a playground preview, not FHIR search pagination.</p>
+          <p>Generated models are read-only. Stored artifacts can be inspected, downloaded and edited as JSON. Libraries can be loaded into the SQL workspace or selected as operation subjects. Refresh catalog reflects saved artifacts; schema changes require a server restart.</p>
+          <h3>Write SQL and generate FHIR Libraries</h3>
+          <p>Start a query from a table or add it as a canonical dependency. The dependency label is the name used in SQL; labels are editable, and joins can combine multiple dependencies. Choose SQLQuery or SQLView, set the artifact ID and optional canonical/title/version, and enter SQL. Advanced controls accept Library parameter declarations and FHIR Parameters input values.</p>
+          <p><strong>Generate Library</strong> produces JSON using the shared server helper, including matching base64 SQL and sql-text. It does not execute, save or fully validate SQL. <strong>Run SQL</strong> sends an inline Library through <code>POST /$sql-run</code>; results appear as a scrollable table and failures as OperationOutcomes. <strong>Save Library</strong> persists through the existing PUT endpoint and asks before replacing an existing ID. Saving a SQLView does not create a physical database view. Loading and editing a stored SQL Library preserves unrelated metadata and non-SQL attachments. Arbitrary SQL is represented as a Library, not automatically translated into a ViewDefinition or clinical FHIR resources.</p>
+          <h3>Invoke FHIR operations</h3>
+          <p>The console accepts the current SQL workspace, a stored reference, a canonical URL or an inline Library/ViewDefinition. Choose JSON, NDJSON or CSV, provide query inputs and optional inline context, then inspect the generated Parameters request. Send uses the form by default. To send a hand-edited Parameters resource, explicitly enable &ldquo;Send edited JSON&rdquo;; this also permits multi-subject exports.</p>
+          <p>The response includes HTTP status, raw output, row tables where applicable, decoded Binary payloads when requested, and OperationOutcome diagnostics. Export invokes <code>$sql-export</code>, follows its status/result flow, and exposes download links, manual status checks and cancellation/deletion. There is no continuous background polling; an export still pending after the initial check needs another status check. Existing backend restrictions still apply.</p>
+          <p>The server advertises its configured canonical base and row ceiling to the UI, so a custom base such as <code>https://ginoc.io/fhir-comparison</code> is used when generating new Libraries. Workspace SQL and form inputs live in browser memory until explicitly saved or downloaded; they are not automatically persisted across page reloads.</p>
+        </article>
+      </section>
+
+      <section class="section" id="architecture" aria-labelledby="architecture-title">
+        <div class="section-heading">
+          <p class="eyebrow">Small, separable layers</p>
+          <h2 id="architecture-title">A schema pipeline and a query pipeline</h2>
+        </div>
+        <article class="card prose">
+          <div class="flow" aria-label="Schema pipeline">
+            <span>SQLite catalog + PRAGMAs</span><b aria-hidden="true">&rarr;</b>
+            <span>SqlSchema</span><b aria-hidden="true">&rarr;</b>
+            <span>Logical models + bindings</span>
+          </div>
+          <p><code>SqliteSchemaReader</code> reads columns, declared types, default SQL expressions, key order, generated columns, indexes and DDL. <code>createLogicalModels</code> is a pure, deterministic conversion. It produces a collection Bundle and a separate in-memory canonical-to-table binding registry. Database paths never enter the models.</p>
+          <div class="flow" aria-label="Execution pipeline">
+            <span>Parameters + subject</span><b aria-hidden="true">&rarr;</b>
+            <span>Canonical dependency graph</span><b aria-hidden="true">&rarr;</b>
+            <span>Scoped SQL CTEs</span><b aria-hidden="true">&rarr;</b>
+            <span>Read-only SQLite</span>
+          </div>
+          <p>The catalog combines generated models with artifacts persisted in a separate SQLite store. Evaluation resolves dependencies by canonical URL, builds nested CTEs under their <code>relatedArtifact.label</code> names, and binds query values rather than interpolating them. No source views or tables are created. A read transaction gives all subjects in one export a consistent SQLite snapshot.</p>
+          <p><strong>Code map:</strong> <code>src/schema.ts</code> reads metadata; <code>models.ts</code> generates models; <code>store.ts</code> manages artifacts; <code>engine.ts</code> compiles/evaluates; <code>operations.ts</code> handles wire inputs and formats; <code>exports.ts</code> persists jobs; <code>playground.ts</code> supplies bounded browser helpers; <code>server.ts</code> exposes HTTP; <code>cli.ts</code> supplies commands; <code>ui/</code> holds the browser workbench.</p>
+          <pre tabindex="0" role="region" aria-label="TypeScript API usage"><code>import { readSqliteSchema, createLogicalModels } from "./dist/src/index.js";
+
+const schema = readSqliteSchema(".data/demo.sqlite");
+const { bundle, bindings } = createLogicalModels(schema, {
+  baseUrl: "https://example.org/sql",
+  version: "1.0.0"
+});</code></pre>
+        </article>
+      </section>
+
+      <section class="section" id="models" aria-labelledby="models-title">
+        <div class="section-heading">
+          <p class="eyebrow">Local experimental contract</p>
+          <h2 id="models-title">One flat StructureDefinition per relation</h2>
+          <p>R5-shaped logical models provide machine-readable structure without claiming that arbitrary SQL rows satisfy FHIR primitive value constraints.</p>
+        </div>
+        <article class="card prose">
+          <p>Each model has <code>kind = logical</code>, <code>derivation = specialization</code>, <code>type = url</code>, explicit <code>draft</code>/<code>experimental</code> status, and a <code>baseDefinition</code> pointing to the bundled local Relation base. Its differential contains a root plus scalar leaf elements. No snapshot or publisher is required for this prototype. IDs, paths and cardinalities are explicit rather than relying on proposal-specific defaults.</p>
+          <pre tabindex="0" role="region" aria-label="Logical model excerpt"><code>{
+  "resourceType": "StructureDefinition",
+  "id": "patient",
+  "url": "https://example.org/sql/StructureDefinition/patient",
+  "name": "patient",
+  "kind": "logical",
+  "abstract": false,
+  "type": "https://example.org/sql/StructureDefinition/patient",
+  "baseDefinition":
+    "https://example.org/sql-table-logical-models/StructureDefinition/Relation",
+  "derivation": "specialization",
+  "differential": {
+    "element": [
+      { "id": "patient", "path": "patient", "min": 0, "max": "*" },
+      {
+        "id": "patient.id", "path": "patient.id", "min": 1, "max": "1",
+        "type": [{ "code": "integer64" }],
+        "extension": [
+          {
+            "url": "https://example.org/sql-table-logical-models/StructureDefinition/sql-type",
+            "valueString": "INTEGER"
+          }
+        ]
+      }
+    ]
+  }
+}</code></pre>
+          <p>This is an excerpt: actual output also includes status, the SQL name, affinity, primary-key position and DDL. Column order follows SQLite <code>cid</code>; composite primary-key order is recorded separately. A database view is another relation with <code>relation-kind = view</code>; its declared column metadata may be incomplete.</p>
+          <h3>Names are logical; SQL names are lossless</h3>
+          <p>Already-safe logical names are retained. Other names receive a deterministic sanitised name with a SHA-256 suffix; resource IDs use a separate FHIR-id-safe encoding. This distinguishes names such as <code>a-b</code>, <code>a_b</code> and <code>a.b</code>. Original physical names survive in <code>sql-name</code>; SQL identifiers are always quoted. These identities are name-derived, so renaming a table changes its generated canonical.</p>
+          <h3>Nullability is not simply “primary key means required”</h3>
+          <p>All columns have <code>max = 1</code>. <code>min = 1</code> reflects declared NOT NULL or an actual SQLite non-null key guarantee: a rowid-alias INTEGER PRIMARY KEY, a WITHOUT ROWID primary key, or a STRICT primary key. An ordinary nullable TEXT/composite primary key remains <code>min = 0</code>. Inline <code>INTEGER PRIMARY KEY DESC</code> is not treated as a rowid alias. View nullability is only what SQLite reports. <a href="#source-sqlite">[6]</a></p>
+          <h3>Metadata does not silently become validation</h3>
+          <p>Default expressions are retained as SQL text, not converted to <code>defaultValue[x]</code>. DDL retains CHECK clauses, collations, generated expressions, identity/autoincrement details and other dialect syntax not otherwise modelled. The implementation neither evaluates those constraints against existing rows nor transforms them into FHIR invariants. FHIR instance conversion and full StructureDefinition validation are outside this iteration.</p>
+        </article>
+      </section>
+
+      <section class="section" id="types" aria-labelledby="types-title">
+        <div class="section-heading">
+          <p class="eyebrow">Storage facts / authoring hints</p>
+          <h2 id="types-title">SQLite type mapping</h2>
+          <p>The exact declared type, SQLite affinity and FHIR-oriented hint are distinct pieces of metadata. Affinity is computed in SQLite's documented order. <a href="#source-sqlite">[6]</a></p>
+        </div>
+        <article class="card prose">
+          <div class="table-scroll" role="region" aria-label="SQLite type mapping table" tabindex="0">
+            <table>
+              <caption>FHIR hints do not coerce query results</caption>
+              <thead><tr><th scope="col">Declared name or affinity</th><th scope="col">FHIR hint</th><th scope="col">Qualification</th></tr></thead>
+              <tbody>
+                <tr><td>BOOL, BOOLEAN</td><td>boolean</td><td>Exact well-known spellings; SQLite may still store non-boolean values.</td></tr>
+                <tr><td>DATE; TIME</td><td>date; time</td><td>Exact names; formats of stored values are not checked.</td></tr>
+                <tr><td>DATETIME, TIMESTAMP, optionally (precision)</td><td>dateTime</td><td>Time zones and actual encodings are not inferred.</td></tr>
+                <tr><td>INTEGER affinity (contains INT)</td><td>integer64</td><td>Preserves the possibility of signed 64-bit SQLite values; not FHIR's 32-bit integer.</td></tr>
+                <tr><td>TEXT affinity (CHAR, CLOB, TEXT)</td><td>string</td><td>No JSON, code or canonical semantics guessed from names.</td></tr>
+                <tr><td>Explicit BLOB</td><td>base64Binary</td><td>Affinity may still differ if an earlier rule matches the declared type.</td></tr>
+                <tr><td>No declared type</td><td>string + warning</td><td>SQLite affinity is BLOB. The hint is provisional, not a sampled type.</td></tr>
+                <tr><td>REAL (REAL, FLOA, DOUB); remaining NUMERIC</td><td>decimal</td><td>Declared DECIMAL precision/scale remain in sql-type; SQLite does not enforce fixed decimal precision.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>Affinity precedence matters: <code>FLOATING POINT</code> contains <code>INT</code> and therefore has INTEGER affinity. The mapped FHIR type is an authoring aid, not a replacement for the declared type grammar. The design starts from the FHIRPath Lab mapping but intentionally uses <code>integer64</code> and keeps foreign-key values primitive. <a href="#source-lab">[5]</a></p>
+          <h3>Wire values stay faithful to SQLite</h3>
+          <p>Safe integers become JSON numbers; integers outside JavaScript's safe range become exact decimal strings. BLOBs become base64 strings; SQL NULL stays JSON null; boolean storage values remain SQLite integers. JSON is an array, NDJSON is one row per line, and CSV has quoted fields and CRLF endings. CSV represents NULL as an empty field and cannot distinguish it from an empty string. Decimal precision already lost by SQLite floating-point storage cannot be recovered here.</p>
+        </article>
+      </section>
+
+      <section class="section" id="relationships" aria-labelledby="relationships-title">
+        <div class="section-heading">
+          <p class="eyebrow">Joins remain ordinary SQL</p>
+          <h2 id="relationships-title">Keys describe relationships, not nested rows</h2>
+        </div>
+        <article class="card prose">
+          <p>Primary-key columns retain their ordered key position. Each foreign key is a relation-level composite extension with an ordered source/target column pairing, a target table, an optional target model canonical, and update/delete actions. An omitted REFERENCES column list is resolved against the target's ordered primary key when possible.</p>
+          <p>Foreign-key columns keep their storage-derived primitive type. They do not become <code>Reference</code> objects or nested relation instances. This keeps SQL joins lossless and supports composite and non-primary unique keys without inventing a reference-serialization convention. The gist discusses other FK spellings; issue 426 leaves foreign keys out of its initial standardisation scope. Our metadata is an independent experiment. <a href="#source-gist">[2]</a> <a href="#source-issue">[1]</a></p>
+          <pre tabindex="0" role="region" aria-label="Join example"><code>SELECT p.patient_id, p.patient_name, v.id AS visit_id, v.cost
+FROM patients p
+JOIN visits v ON v.patient_id = p.patient_id
+WHERE (:minimum_cost IS NULL OR v.cost &gt;= :minimum_cost)
+ORDER BY v.id</code></pre>
+          <p>Here <code>patients</code> is a SQLView label and <code>visits</code> is a logical-model dependency label, not a physical table name. The physical mapping stays local. A declared foreign key is descriptive metadata; the query author still writes the join condition. No relationship is inferred merely because a column ends in <code>Id</code> or <code>Key</code>.</p>
+        </article>
+      </section>
+
+      <section class="section" id="composition" aria-labelledby="composition-title">
+        <div class="section-heading">
+          <p class="eyebrow">Reuse the existing composition vocabulary</p>
+          <h2 id="composition-title">Library, SQLView and ViewDefinition</h2>
+        </div>
+        <article class="card prose">
+          <p>SQL Libraries use the specification's <code>LibraryTypesCodes#sql-query</code> or <code>#sql-view</code> coding. SQL text lives in an <code>application/sql</code> attachment, as base64 <code>data</code>, the standard <code>sql-text</code> extension, or both. If both are supplied they must match exactly. Remote SQL attachments are rejected. The exported <code>sqlLibrary()</code> helper writes both representations. <a href="#source-spec">[3]</a></p>
+          <pre tabindex="0" role="region" aria-label="Dependency metadata example"><code>"relatedArtifact": [
+  {
+    "type": "depends-on",
+    "label": "patients",
+    "resource": "https://example.org/sql/Library/active-patients"
+  },
+  {
+    "type": "depends-on",
+    "label": "visits",
+    "resource": "https://example.org/sql/StructureDefinition/visit"
+  }
+]</code></pre>
+          <p>A dependency may be a configured logical relation, a supported ViewDefinition, or a SQLView Library. A SQLQuery may be an execution subject but not another query's dependency. Labels must be simple SQL identifiers and unique case-insensitively within their Library. Nested scopes avoid collisions between unrelated dependencies using the same label. Cycles and dependency chains deeper than 32 are rejected.</p>
+          <h3>A deliberately limited relational ViewDefinition</h3>
+          <p>The fixture's <code>patient-projection</code> uses <code>resource = patient</code>, a local <code>source</code> extension containing the relation canonical, and flat <code>select.column</code> entries. Each path is a direct <em>logical</em> column name; the binding maps it back to its physical SQL identifier. Column <code>type</code> is descriptive only. This is a local extension to ViewDefinition source semantics, not general FHIR resource evaluation.</p>
+          <p>FHIRPath functions, nested paths, <code>where</code>, constants, collections, <code>forEach</code>, nested select and unions are rejected. Use a SQLView for filtering, calculated expressions or joins. The local JS reference implementation has a real FHIR ViewDefinition evaluator; this project does not copy or claim that engine's conformance. <a href="#source-js">[4]</a></p>
+          <h3>Resolution and query parameters</h3>
+          <p>Canonical references may include <code>|version</code>. A matching inline <code>context</code> dependency outranks the stored artifact. Ambiguous unversioned references fail rather than choosing an arbitrary version. Context entries must have unique URLs and all must be used somewhere in the invocation's dependency graph. A missing canonical returns a 404 OperationOutcome. Generated models cannot be edited or deleted via HTTP.</p>
+          <p>Input values are nested FHIR Parameters matched by declared Library parameter name and <code>value[x]</code> field. Supported declarations are scalar input <code>string</code>, <code>integer</code>, <code>integer64</code>, <code>decimal</code>, <code>boolean</code>, <code>date</code> and <code>dateTime</code>. Only <code>:name</code> SQL placeholders are accepted; undeclared placeholders and undeclared/repeated supplied values fail. Required inputs have <code>min = 1</code>; omitted optional inputs bind as SQL NULL. Parameterised SQLView dependencies are not supported. Date strings are passed through to SQLite; callers remain responsible for their FHIR lexical form.</p>
+        </article>
+      </section>
+
+      <section class="section" id="api" aria-labelledby="api-title">
+        <div class="section-heading">
+          <p class="eyebrow">Local HTTP API</p>
+          <h2 id="api-title">Manage artifacts and evaluate subjects</h2>
+          <p>FHIR JSON resource shapes and SQL-on-FHIR operation names are reused, but the management API is a small subset: no history, transactions, paging, conditional updates or full profile validation.</p>
+        </div>
+        <article class="card prose">
+          <div class="table-scroll" role="region" aria-label="HTTP endpoint reference" tabindex="0">
+            <table>
+              <caption>Endpoints and behavior</caption>
+              <thead><tr><th scope="col">Method / path</th><th scope="col">Behavior</th></tr></thead>
+              <tbody>
+                <tr><td>GET / or /metadata</td><td>CapabilityStatement describing this partial implementation.</td></tr>
+                <tr><td>GET /playground/</td><td>Interactive table/artifact browser, SQL workspace and FHIR operations console.</td></tr>
+                <tr><td>GET /playground/api/catalog or /rows</td><td>Local workbench helpers: schema/artifact metadata or a bounded table preview (name, offset, limit).</td></tr>
+                <tr><td>POST /playground/api/library</td><td>Generate a SQLQuery/SQLView Library without executing or saving it; not a standard FHIR operation.</td></tr>
+                <tr><td>GET /OperationDefinition/sql-run or sql-export</td><td>Local partial-operation definitions referencing the specification via base.</td></tr>
+                <tr><td>GET /StructureDefinition, /Library, /ViewDefinition</td><td>Searchset Bundle; optional exact url and version filters.</td></tr>
+                <tr><td>GET /{type}/{id}</td><td>Read an artifact.</td></tr>
+                <tr><td>POST /{type}</td><td>Create with a server-generated ID. Requires JSON content type.</td></tr>
+                <tr><td>PUT /{type}/{id}</td><td>Create/update an artifact with a matching type/ID; canonical+version ownership must be unique.</td></tr>
+                <tr><td>DELETE /{type}/{id}</td><td>Delete a stored artifact (204). Generated models remain read-only.</td></tr>
+                <tr><td>GET or POST /$sql-run</td><td>Evaluate one Library or supported ViewDefinition; POST takes a FHIR Parameters body.</td></tr>
+                <tr><td>POST /$sql-export</td><td>Queue up to 20 subjects after graph/SQL preparation; requires Prefer: respond-async.</td></tr>
+                <tr><td>GET export status / result / download</td><td>Follow Content-Location, then 303 Location, then output.location from the manifest.</td></tr>
+                <tr><td>DELETE export status URL</td><td>Cancel queued work or delete stored output (202); subsequent reads return 404.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h3>$sql-run inputs</h3>
+          <p>Supply exactly one <code>subjectCanonical</code> (<code>valueCanonical</code>), <code>subjectReference</code> (<code>valueReference.reference</code>) or <code>subjectResource</code> (<code>resource</code>). Local references are <code>Library/id</code> or <code>ViewDefinition/id</code>. Optional inputs are <code>parameters</code>, repeating <code>context</code>, <code>_format</code>, <code>header</code> and <code>_limit</code>. GET supports only the primitive/query-string forms. Unknown operation parameters are rejected, not silently ignored.</p>
+          <p><code>_format</code> accepts <code>json</code>, <code>ndjson</code> or <code>csv</code>. Without it, a supported Accept media type selects the format; otherwise NDJSON is the default. <code>Accept: application/fhir+json</code> requests a base64 Binary envelope. Explicit <code>_format</code> wins. XML, Parquet and <code>_format=fhir</code> are not supported. CSV includes column headers even for zero rows unless <code>header=false</code>. <a href="#source-spec">[3]</a></p>
+          <p><code>_limit</code> caps returned rows after SQL evaluation semantics, including joins, aggregation and ordering. Zero prepares the query and returns no rows. The default safety ceiling is 1,000 rows, configurable with <code>--max-rows</code>. Exceeding it without a smaller explicit limit returns an error, never a silently truncated result; a requested limit above the ceiling is rejected.</p>
+          <h3>$sql-export lifecycle</h3>
+          <pre tabindex="0" role="region" aria-label="Export request command"><code>curl.exe -i -X POST 'http://127.0.0.1:3000/$sql-export' `
+  -H 'Content-Type: application/fhir+json' `
+  -H 'Prefer: respond-async' `
+  --data-binary '@examples\export.json'</code></pre>
+          <p>The input contains repeating <code>subject</code> parts, each with a naming form, optional <code>name</code> and optional nested query <code>parameters</code>. Format, header and context apply to the whole job. A subject name defaults to its artifact name, or a generated ID; names must be unique and filename-safe, otherwise supply an explicit one. Export output defaults to NDJSON independently of Accept and never accepts <code>_limit</code>.</p>
+          <p>Kick-off returns 202 and Content-Location. Status returns 202 while queued and 303 when finished; the result URL returns a Parameters manifest or an OperationOutcome. The manifest includes exportId, status, format, timing, echoed clientTrackingId if supplied, and one output entry per subject. All subjects execute in one read transaction. Jobs and output bytes persist in the artifact store without automatic expiration. Interrupted jobs become failed after a restart. Cancellation cannot preempt synchronous SQL already running on the event loop.</p>
+          <p><strong>Error contract:</strong> malformed inputs or unsupported features return 400 (or 415 for content type), missing artifacts 404, ambiguous/conflicting canonicals 409, query/shape/row-budget failures 422 and incompatible Accept 406. Errors carry an OperationOutcome. Unexpected failures are logged and return 500. Request bodies are limited to 1 MiB.</p>
+        </article>
+      </section>
+
+      <section class="section" id="starter" aria-labelledby="starter-title">
+        <div class="section-heading">
+          <p class="eyebrow">Observed metadata, not sampled records</p>
+          <h2 id="starter-title">What the supplied database contributes</h2>
+        </div>
+        <article class="card prose">
+          <p>The supplied <code>temp/fhir-comparison.sqlite</code> contains 36 application tables, 839 columns, no native views and no declared foreign keys. These counts come from SQLite catalog/PRAGMA metadata on 17 November 2026. Generation yields 36 relation models plus the local abstract Relation base. No row contents are embedded in this documentation.</p>
+          <p><code>FhirPackages</code> and <code>Structures</code> provide a useful exploration surface. Both have an INTEGER primary-key column named <code>Key</code>; <code>Structures</code> also declares <code>FhirPackageKey</code>. Their names suggest a possible join, but the database declares no foreign key, so the generator correctly emits no relationship for it. Any such join remains an author-supplied assumption requiring domain confirmation.</p>
+          <p>The data file stays in gitignored <code>temp/</code>. Real derived models should stay under gitignored <code>.data/</code> until deliberately reviewed. The checked-in clinic fixtures exercise foreign keys, views and joins independently, so the implementation remains reproducible without the starter data.</p>
+        </article>
+      </section>
+
+      <section class="section" id="decisions" aria-labelledby="decisions-title">
+        <div class="section-heading">
+          <p class="eyebrow">Deliberate choices, easy to revisit</p>
+          <h2 id="decisions-title">Logical discoverability, SQL fidelity</h2>
+        </div>
+        <div class="card-grid">
+          <article class="card">
+            <span class="badge">Implemented choice</span>
+            <h3>A local Relation base</h3>
+            <p>Recognise a relation by an explicit experimental base. Keep this canonical independent of the still-unsettled HL7 proposal so migration can be deliberate rather than pretending consensus.</p>
+          </article>
+          <article class="card">
+            <span class="badge">Implemented choice</span>
+            <h3>SQL types as text, not codes</h3>
+            <p>Store the full declared type and DDL, alongside FHIR hints. Issue comments question FHIR types and suggest a DDL Library instead; the retained DDL makes that alternative possible without re-inventing storage grammar. <a href="#source-issue">[1]</a></p>
+          </article>
+          <article class="card">
+            <span class="badge">Implemented choice</span>
+            <h3>Binding is configuration</h3>
+            <p>The discovered database determines the physical bindings. An uploaded logical model or attachment cannot redirect the server to a file, URL or another database. No CSV/Parquet loader or remote canonical fetching is implemented.</p>
+          </article>
+          <article class="card">
+            <span class="badge">Future alternative</span>
+            <h3>A DDL or dataset Library</h3>
+            <p>A separate Library could hold DDL, source location or dataset identity, while the logical model remains a schema projection. That is not generated or resolved yet, and no new Library type is claimed to be standard.</p>
+          </article>
+        </div>
+        <article class="card prose section">
+          <h3>Experimental extension vocabulary</h3>
+          <p>Every name below is relative to <code>https://example.org/sql-table-logical-models/StructureDefinition/</code>. These are documented local conventions, not published Extension profiles or claims of validator conformance.</p>
+          <div class="table-scroll" role="region" aria-label="Experimental extension vocabulary" tabindex="0">
+            <table>
+              <caption>Wire representations used by this prototype</caption>
+              <thead><tr><th scope="col">Name / placement</th><th scope="col">Value</th><th scope="col">Meaning</th></tr></thead>
+              <tbody>
+                <tr><td>sql-name / model or column</td><td>valueString</td><td>Unmodified physical SQL identifier.</td></tr>
+                <tr><td>relation-kind / model</td><td>valueCode</td><td>table or view.</td></tr>
+                <tr><td>sql-ddl / model</td><td>valueString</td><td>Original CREATE text from sqlite_schema.</td></tr>
+                <tr><td>sqlite-strict; sqlite-without-rowid / model</td><td>valueBoolean</td><td>Dialect table flags.</td></tr>
+                <tr><td>sql-type; sqlite-affinity / column</td><td>valueString; valueCode</td><td>Declared type grammar and computed affinity. The sql mapping also carries declared type text.</td></tr>
+                <tr><td>primary-key-position / column</td><td>valueInteger</td><td>One-based position in the composite primary key.</td></tr>
+                <tr><td>sql-default / column</td><td>valueString</td><td>Unevaluated SQL default expression.</td></tr>
+                <tr><td>generated / column</td><td>valueCode</td><td>virtual or stored; hidden virtual-table columns are omitted.</td></tr>
+                <tr><td>foreign-key / model</td><td>Nested extensions</td><td>id (integer), target-table (string), optional target (canonical), repeated column with source/target strings, on-update/on-delete (codes), match (string).</td></tr>
+                <tr><td>sql-index / model</td><td>valueString containing JSON</td><td>name, unique, origin, partial, sql, columns (name/null, descending, collation). Expressions and predicates remain in DDL.</td></tr>
+                <tr><td>source / ViewDefinition</td><td>valueCanonical</td><td>The configured logical relation supplying row projections.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>The index JSON is a pragmatic dialect payload, not a portable FHIR constraint vocabulary. There is intentionally no <code>relation-source</code> attachment loader yet. Configuration-based binding follows the proposal's separation between canonical schema identity and environment-specific data. <a href="#source-gist">[2]</a></p>
+        </article>
+      </section>
+
+      <section class="section" id="limits" aria-labelledby="limits-title">
+        <div class="section-heading">
+          <p class="eyebrow">Explicit boundaries</p>
+          <h2 id="limits-title">An exploration server, not a deployment boundary</h2>
+        </div>
+        <article class="card prose">
+          <p><strong>Trusted local use only.</strong> There is no authentication or authorisation. The CLI binds to loopback, rejects cross-origin requests, disables extension loading, opens the source read-only and uses SQLite's authorizer to reject writes, PRAGMAs and ATTACH. Those safeguards do not make SQL safe for untrusted users. A query may read any table in the configured source database; dependency declarations are not access-control rules.</p>
+          <p>Execution is synchronous and buffered. Row caps do not bound execution time, aggregate/join complexity, row byte size or export-store growth. Long SQL blocks all requests, including cancellation. Run only trusted SQL; a network-facing service needs authentication, a read allowlist, worker/process isolation, execution/time/memory budgets and output retention. Use one server process per artifact store. Do not configure the artifact store as the source database.</p>
+          <p>No FHIR data ingestion, terminology dependencies, patient/group/_since filters, arbitrary FHIRPath, relation-source downloads, SQL writes, materialisation policy, FHIR search pagination or Parquet is implemented. Unsupported operation parameters and unsupported projection features fail explicitly. A native database view is introspected but its result constraints cannot be proven from column metadata.</p>
+          <h3>Extending to other databases</h3>
+          <p>The reader interface and explicit schema types separate discovery from generation, but the current dialect and mapper are SQLite-only. A PostgreSQL or SQL Server adapter must widen the dialect model, supply its catalog reader, implement declared-type mapping, and add an execution backend with equivalent identifier quoting, bindings, read-only enforcement and snapshot semantics. Reuse the flat model and canonical/label contracts; do not feed a different dialect into the SQLite affinity mapper.</p>
+          <h3>Open design questions</h3>
+          <p>Resolve the upstream Relation-versus-DDL direction before publishing a profile. Decide how source bindings are deployed, how curated canonical identities survive schema renames, and whether key/constraint metadata should become proper Extension definitions. A FHIR instance adapter, verified primitive conversions and a full ViewDefinition engine are separate additions, not consequences of schema introspection alone.</p>
+          <p>Semantic database comments are not parsed from DDL in this iteration. DDL itself is retained. The FHIRPath Lab design includes a comment parser and row/reference conversion; those capabilities are related prior art, not implemented features here. <a href="#source-lab">[5]</a></p>
+        </article>
+      </section>
+
+      <section class="section" id="sources" aria-labelledby="sources-title">
+        <div class="section-heading">
+          <p class="eyebrow">Evidence and uncertainty</p>
+          <h2 id="sources-title">Sources and provenance</h2>
+          <p>Read on 17 November 2026. Upstream drafts may change. Local choices above are labelled separately from specification behavior.</p>
+        </div>
+        <article class="card prose">
+          <ol class="sources">
+            <li id="source-issue"><strong>[1] HL7/sql-on-fhir issue 426.</strong> <a href="https://github.com/HL7/sql-on-fhir/issues/426">Support external tables in SQLQuery and SQLView</a>, opened 16 November 2026. Establishes proposed scope, exclusion from 3.0.0, unsettled storage/source representations, and contrary comments favouring SQL types or DDL Libraries. This is an open issue, not normative specification.</li>
+            <li id="source-gist"><strong>[2] Niquola's discussion draft.</strong> <a href="https://gist.github.com/niquola/84d776f18e7aaf4b6780a1508ee63884">External tables in SQL on FHIR</a>, 10 November 2026. Proposes a flat Relation model, relatedArtifact labels and configuration-first source bindings. FK typing and other alternatives in that draft are not adopted here.</li>
+            <li id="source-spec"><strong>[3] Local SQL on FHIR specification.</strong> <code>E:\ai\specs\sql-on-fhir</code>, HEAD <code>bc3730fe006ed5c51940322a7160ea8b9c2e692e</code>. Read <code>input/pagecontent/operations-common.md</code>, <code>OperationDefinition-SQLExport-notes.md</code>, <code>StructureDefinition-SQLQuery-notes.md</code> and <code>StructureDefinition-SQLView-notes.md</code>. Supports subject/parameter shapes, labels, output formats, Binary envelopes and async lifecycle. Public evolving reference: <a href="https://build.fhir.org/ig/HL7/sql-on-fhir/operations-common.html">Common operation behavior</a>.</li>
+            <li id="source-js"><strong>[4] Local JavaScript reference implementation.</strong> <code>E:\ai\git\sql-on-fhir.js</code>, HEAD <code>7fba7909f34b090059e2e715ee7e30df30fa7f9c</code>. Read <code>sof-js/README.md</code>, <code>src/server/sqlEngine.js</code> and <code>src/server/sqlRun.js</code> beneath <code>sof-js</code>. Demonstrates composition and operations; its in-memory materialisation differs from this prototype's direct read-only CTE binding. <a href="https://github.com/FHIR/sql-on-fhir.js">Repository</a>.</li>
+            <li id="source-lab"><strong>[5] FHIRPath Lab prior art.</strong> <a href="https://github.com/brianpos/fhirpath-lab/blob/miniature-pancake/docs/database-logical-models.md#type-mapping-sqlite">Database logical models and mapping database rows to FHIR</a>, branch <code>miniature-pancake</code>. Supports layered schema reading, declared-type hints, physical-name preservation and explicit composite-key concerns. Its Reference/FML instance adapter is a different consumer and is not reproduced here.</li>
+            <li id="source-sqlite"><strong>[6] SQLite semantics.</strong> <a href="https://sqlite.org/datatype3.html">Datatypes and affinity</a>, <a href="https://sqlite.org/lang_createtable.html">CREATE TABLE</a> and <a href="https://sqlite.org/pragma.html">PRAGMA documentation</a>. Basis for affinity precedence, rowid alias versus nullable primary keys and catalog interpretation.</li>
+            <li id="source-chat"><strong>[7] Linked Zulip discussion.</strong> <a href="https://chat.fhir.org/#narrow/channel/179219-analytics-on-FHIR/topic/External.20tables.20.2F.20relations.20in.20SQL.20on.20FHIR/with/639226061">External tables / relations in SQL on FHIR</a>. The web fetch returned only the client loading/error shell. The conversation was not independently verified; no claim here relies on an unseen message. The gist's quotations are attributed to the gist.</li>
+            <li id="source-style"><strong>[8] Documentation styling.</strong> Local <code>E:\ai\git\devskills\.github\skills\dev-explore\references\html-contract.md</code> and bundled assets. Adapted editorial rail, cards, static delivery, native System/Light/Dark control, visible storage failures, narrow-screen navigation and print layout. Custom main accent <code>#525ebb</code>; a lighter indigo is used for dark-theme text contrast.</li>
+          </ol>
+          <p>Implementation-specific claims are grounded in the checked-in TypeScript and synthetic fixtures. Starter counts are a local metadata observation, not a guarantee about future copies of that database. No clinical or private row data was used in the documentation.</p>
+        </article>
+      </section>
+    </main>
+    <footer><p>SQL table logical models / local experimental contract / 0.1.0. Static documentation; no external assets, analytics or runtime content requests.</p></footer>
+  </div>
+</body>
+</html>

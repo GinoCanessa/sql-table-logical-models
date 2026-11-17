@@ -1,0 +1,14 @@
+{
+  "resourceType": "Parameters",
+  "parameter": [
+    { "name": "subjectReference", "valueReference": { "reference": "Library/patient-visits" } },
+    {
+      "name": "parameters",
+      "resource": {
+        "resourceType": "Parameters",
+        "parameter": [{ "name": "minimum_cost", "valueDecimal": 25 }]
+      }
+    },
+    { "name": "_format", "valueCode": "json" }
+  ]
+}

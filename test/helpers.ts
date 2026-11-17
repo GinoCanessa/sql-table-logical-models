@@ -1,0 +1,55 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import type { TestContext } from "node:test";
+import { artifact, ArtifactStore, Catalog } from "../src/store.js";
+import { createLogicalModels } from "../src/models.js";
+import { readSqliteSchema } from "../src/schema.js";
+import { QueryEngine } from "../src/engine.js";
+import { array, object } from "../src/fhir.js";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
+import { createApp } from "../src/server.js";
+import type { ServerOptions } from "../src/server.js";
+
+export function fixture(t: TestContext, maxRows = 1000) {
+  const root = resolve(".data");
+  mkdirSync(root, { recursive: true });
+  const directory = mkdtempSync(join(root, "test-"));
+  const cleanup: (() => void | Promise<void>)[] = [];
+  t.after(async () => {
+    for (const close of cleanup.reverse()) await close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const database = join(directory, "source.sqlite");
+  const artifacts = join(directory, "artifacts.sqlite");
+  const db = new DatabaseSync(database);
+  db.exec(readFileSync(new URL("../../examples/clinic.sql", import.meta.url), "utf8"));
+  db.close();
+  const models = createLogicalModels(readSqliteSchema(database));
+  const store = new ArtifactStore(artifacts);
+  cleanup.push(() => store.close());
+  const samples = object(JSON.parse(readFileSync(new URL("../../examples/artifacts.json", import.meta.url), "utf8")));
+  for (const entry of array(samples.entry, "entry")) store.put(object(entry).resource);
+  const catalog = new Catalog(store, models.resources);
+  const engine = new QueryEngine(database, catalog, models.bindings, maxRows);
+  return { directory, database, artifacts, store, catalog, engine, models, cleanup };
+}
+
+export function sample(id: string) {
+  const bundle = object(JSON.parse(readFileSync(new URL("../../examples/artifacts.json", import.meta.url), "utf8")));
+  return array(bundle.entry, "entry").map((e) => artifact(object(e).resource)).find((r) => r.id === id)!;
+}
+
+export async function serverFixture(t: TestContext, options: Omit<ServerOptions, "database" | "artifacts"> = {}) {
+  const setup = fixture(t, options.maxRows);
+  const app = createApp({ database: setup.database, artifacts: setup.artifacts, ...options });
+  app.server.listen(0, "127.0.0.1");
+  await once(app.server, "listening");
+  const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  setup.cleanup.push(async () => {
+    await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+    app.close();
+  });
+  return { ...setup, base };
+}
