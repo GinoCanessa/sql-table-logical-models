@@ -9,6 +9,8 @@ import { ArtifactStore } from "../src/store.js";
 import { extractSql, singleStatement } from "../src/engine.js";
 import { ExportJobs } from "../src/exports.js";
 import { join } from "node:path";
+import { checkRows, checkWire } from "../src/conformance.js";
+import { formatResult } from "../src/operations.js";
 
 const errorCode = (status: number) => (error: unknown) => error instanceof OperationError && error.status === status;
 
@@ -104,6 +106,8 @@ test("prepared origins survive aliases and output declarations are not input pla
   outputOnly.parameter = [{ use: "out", name: "n", type: "integer" }];
   assert.throws(() => engine.run(outputOnly), /not declared/);
   assert.throws(() => engine.run(outputOnly, { parameters }), /Undeclared query parameter/);
+  const implicit = sqlLibrary("declared", "SELECT :n AS original", [], "sql-view");
+  assert.throws(() => engine.describe(subject, { context: [implicit] }), /dependency placeholders/);
 });
 
 test("a batch holds a single SQLite snapshot when another connection changes the source between subjects", (t) => {
@@ -159,6 +163,24 @@ test("completed exports survive reopen and interrupted exports become explicit f
   } finally { reopened.close(); }
 });
 
+test("reopening a legacy completed job neither rewrites its manifest nor invents a model snapshot", (t) => {
+  const { engine, directory } = fixture(t);
+  const path = join(directory, "legacy.sqlite");
+  const db = new DatabaseSync(path);
+  const job = { state: "complete", result: { resourceType: "Parameters", parameter: [{ name: "output", part: [
+    { name: "name", valueString: "old" }, { name: "location", valueUri: "urn:example:old" },
+  ] }] }, files: { "old.json": { contentType: "application/json", body: '[{"n":7}]' } } };
+  try {
+    db.exec("CREATE TABLE export_jobs (id TEXT PRIMARY KEY, json TEXT NOT NULL)");
+    db.prepare("INSERT INTO export_jobs VALUES (?, ?)").run("old", JSON.stringify(job));
+  } finally { db.close(); }
+  const jobs = new ExportJobs(path, engine);
+  try {
+    assert.deepEqual(jobs.get("old"), job);
+    assert.deepEqual(jobs.snapshots(), []);
+  } finally { jobs.close(); }
+});
+
 test("artifact persistence and SQL attachment consistency survive round trips", (t) => {
   const { store, artifacts } = fixture(t);
   const query = sqlLibrary("persisted", "SELECT 1 AS one", []);
@@ -201,4 +223,37 @@ test("SQL execution retains legacy default attachments but rejects libraries con
   assert.throws(() => engine.run(query), {
     status: 422, code: "not-supported", message: /SQLite or default SQL content/,
   });
+});
+
+test("conformance checks ordered descriptors, exact primitive cells, collections and CSV record boundaries", (t) => {
+  const { engine } = fixture(t);
+  const query = sqlLibrary("verified", "SELECT 0 AS i, 0 AS flag, x'00ff' AS bytes, 7 AS wide, NULL AS optional, 'four' AS label, 1 AS unknown", []);
+  query.parameter = Object.entries({ i: "integer", flag: "boolean", bytes: "base64Binary", wide: "integer64", optional: "string", label: "string" })
+    .reverse().map(([name, type]) => ({ name, type, use: "out", min: name === "optional" ? 0 : 1, max: name === "label" ? "*" : "1" }));
+  const result = engine.runPreparedBatch([{ subject: query }])[0]!;
+  const model = result.contract.model;
+  const { columns, rows } = engine.run(query);
+  assert.deepEqual(rows, [{ i: 0, flag: false, bytes: "AP8=", wide: "7", optional: null, label: ["four"], unknown: 1 }]);
+  assert.deepEqual(checkRows(model, rows, columns).map((i) => i.severity), ["information"]);
+  const row = rows[0]!;
+  for (const bad of [Object.fromEntries(Object.entries(row).slice(1)), { ...row, extra: "" }, Object.fromEntries(Object.entries(row).reverse()),
+    { ...row, i: "0" }, { ...row, i: 2147483648 }, { ...row, flag: 0 }, { ...row, bytes: "!" }, { ...row, wide: 7 },
+    { ...row, wide: "9223372036854775808" }, { ...row, label: "four" }, { ...row, label: [""] }, { ...row, label: [null] }, { ...row, flag: null }]) {
+    assert.ok(checkRows(model, [bad]).some((i) => i.severity === "error"), JSON.stringify(bad));
+  }
+  assert.ok(checkRows(model, [], columns.slice(1)).some((i) => i.severity === "error"));
+  for (const format of ["json", "ndjson", "csv"] as const) {
+    const wire = formatResult(result, format, true);
+    assert.deepEqual(checkWire(model, result, wire, format, true).map((i) => i.severity), ["information"]);
+    assert.ok(checkWire(model, result, wire.replace("four", "five"), format, true).some((i) => i.severity === "error"));
+    const empty = engine.runPreparedBatch([{ subject: query }], { limit: 0 })[0]!;
+    for (const header of [true, false]) {
+      assert.deepEqual(checkWire(model, empty, formatResult(empty, format, header), format, header).map((i) => i.severity), ["information"]);
+    }
+  }
+  const exact = sqlLibrary("exact", "SELECT 9223372036854775807 AS amount", []);
+  exact.parameter = [{ name: "amount", use: "out", type: "decimal" }];
+  const decimal = engine.runPreparedBatch([{ subject: exact }])[0]!;
+  assert.throws(() => formatResult(decimal, "json", false), /lossless finite JSON/);
+  assert.deepEqual(checkWire(decimal.contract.model, decimal, "9223372036854775807\r\n", "csv", false), []);
 });

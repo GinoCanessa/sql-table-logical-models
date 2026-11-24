@@ -196,6 +196,7 @@ test("draft Relation read, import and resolution preserve id-less defaults, memb
   const { catalog } = fixture(t);
   const model: Artifact = {
     resourceType: "StructureDefinition", id: "external", name: "external", url: "https://example.org/external",
+    kind: "logical", derivation: "specialization", abstract: false, type: "https://example.org/external",
     baseDefinition: SOF_RELATION, extension: [sqliteContentTypeExtension(), {
       url: `${SOF}/StructureDefinition/relation-source`, valueAttachment: { url: "urn:example:never-fetch", contentType: "text/csv" },
     }], differential: { element: [{ path: "external" }, ...["a", "b"].map((name) => ({

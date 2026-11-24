@@ -74,6 +74,23 @@ Migrate readers away from the old column-level `sql-type.valueString`, `sqlite-a
 
 **JSON/NDJSON change:** Run and export now write every modeled `integer64` as a decimal string, including `"1"`. Modeled `integer` and `decimal` are numbers; `40` remains a number for an integral cost. SQL NULL remains `null`. An untyped expression still uses its SQLite storage value, not a guessed type. CSV retains its raw fields, optional headers, quoting and CRLF. The completed export manifest distinguishes its top-level polling `location` from each file's `output.location`.
 
+## Describe before running
+
+```powershell
+curl.exe -H 'Content-Type: application/fhir+json' --data-binary '@examples/describe.json' 'http://127.0.0.1:3000/$sql-describe'
+curl.exe 'http://127.0.0.1:3000/$sql-describe?subjectReference=ViewDefinition/patient-projection&_format=sql'
+curl.exe 'http://127.0.0.1:3000/$feature-query?param=operation-profile@Library/patient-visits'
+curl.exe -H 'Content-Type: application/fhir+json' --data-binary '@examples/feature-query.json' 'http://127.0.0.1:3000/$feature-query'
+```
+
+Describe prepares the same read-only statement as run without binding values or reading a row. Use the ordered model (default), SQLite DDL for **your destination**, or `_format=operation` for the system `$sql-run` profile. Playground **Describe result** and **Operation profile** inspect a saved subject or unsaved workspace with its context; neither runs nor saves it.
+
+Direct ViewDefinition projections retain source nullability; `collection: true` wraps each non-NULL scalar in a singleton JSON array. Library outputs default to nullable even for a NOT NULL source: joins can introduce NULL. Declare `Library.parameter` entries with `use: "out"` by output alias to assert a primitive, cardinality and documentation. An unresolved expression remains in column order with a comment and **no type**. It supports structural checks, not a fully typed contract. Modeled booleans are JSON `true`/`false`, BLOBs base64; CSV uses SQLite cells (`1`/`0`, NULL as an empty field).
+
+Discovery reports current saved-subject contracts; POST supports canonical `url|version` scopes. Read the returned `StructureDefinition/{id}` or `OperationDefinition/{id}` on the **serving FHIR base**, not the example canonical host, or search there by `?url=`. A change to the effective graph changes the identity. An inline profile contains its model rather than promising a later read. Every completed new export includes an immutable `output.model` canonical per named file, retained with the job even if the subject changes. Older jobs have no inferred model. `Required-Features: param=integer64-json(string)` gates run, describe and export; unmet requirements return 501 before operation work.
+
+For this migration iteration `serve --relation-validation warn` is the default. `error` rejects invalid Relation writes and resolution with a path-addressed 422 OperationOutcome. Ignored tooling fields warn; `Prefer: return=OperationOutcome` requests write diagnostics. Generated models always undergo checks. Neither mode creates a physical binding. `serve --verify-output` additionally checks each run and exported file against its evaluation's model; incompatible rows fail, SQLite length overruns warn (`X-Relation-Issue-Count` on successful output). It is off by default.
+
 ## Development
 
 ```powershell

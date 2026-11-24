@@ -1,0 +1,8 @@
+{
+  "resourceType": "Parameters",
+  "parameter": [
+    { "name": "subjectReference", "valueReference": { "reference": "Library/patient-visits" } },
+    { "name": "dialect", "valueCode": "application/sql;dialect=sqlite" },
+    { "name": "_format", "valueCode": "json" }
+  ]
+}

@@ -77,7 +77,8 @@ test("SQL generates an annotated SQLite Library which can be saved, reloaded and
     id: "generated-query", kind: "sql-query", title: "Names by key",
     sql: "SELECT name FROM people WHERE id >= :minimum; -- final",
     dependencies: [{ label: "people", resource: "https://example.org/sql/StructureDefinition/patient" }],
-    parameters: [{ name: "minimum", use: "in", type: "integer", min: 1, max: "1" }],
+    parameters: [{ name: "minimum", use: "in", type: "integer", min: 1, max: "1" },
+      { name: "name", use: "out", type: "string", min: 1, documentation: "Display label" }],
   }));
   assert.equal(response.status, 200);
   const library = object(await response.json());
@@ -94,6 +95,7 @@ test("SQL generates an annotated SQLite Library which can be saved, reloaded and
   const workspace = object(await (await fetch(`${base}/playground/api/workspace?reference=Library/generated-query`)).json());
   assert.equal(workspace.sql, "SELECT name FROM people WHERE id >= :minimum; -- final");
   assert.equal(workspace.kind, "sql-query");
+  assert.deepEqual(object(workspace.resource).parameter, library.parameter);
   const result = await fetch(`${base}/$sql-run`, post({
     resourceType: "Parameters", parameter: [
       { name: "subjectReference", valueReference: { reference: "Library/generated-query" } },

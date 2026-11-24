@@ -92,6 +92,39 @@ test("playground browsing loads bounded table pages and keeps generated artifact
   assert.equal(ui.node("artifact-save").hasAttribute("disabled"), true);
 });
 
+test("Describe result and Operation profile inspect saved and unsaved subjects without input values, runs or saves", async (t) => {
+  const calls: { path: string; method: string; body?: string }[] = [];
+  const ui = await uiFixture(t, async (path, init) => { calls.push({ path, method: init?.method ?? "GET", ...(init?.body ? { body: String(init.body) } : {}) }); });
+  const declarations = [{ name: "input", use: "in", min: 1, max: "1", type: "integer" }, { name: "n", use: "out", min: 1, type: "integer" }];
+  ui.field("sql-editor", "SELECT :input AS n");
+  ui.field("library-id", "not-saved");
+  ui.field("parameter-declarations", JSON.stringify(declarations));
+  ui.field("operation-parameters", "ignored: not even JSON");
+  for (const mode of ["reference", "workspace"]) {
+    ui.field("operation-subject-kind", mode);
+    if (mode === "reference") ui.field("operation-reference", "Library/patient-visits");
+    for (const [control, type] of [["describe-result", "StructureDefinition"], ["operation-profile", "OperationDefinition"]] as const) {
+      const n = calls.length;
+      ui.click(control);
+      await ui.wait(() => calls.slice(n).some((c) => c.path === "/$sql-describe") &&
+        ui.node("operation-response").textContent.startsWith(`{\n  "resourceType": "${type}"`));
+      const body = JSON.parse(calls.slice(n).find((c) => c.path === "/$sql-describe")!.body!);
+      assert.deepEqual(body.parameter.map((p: { name: string }) => p.name), [mode === "reference" ? "subjectReference" : "subjectResource",
+        ...(control === "operation-profile" ? ["_format"] : [])]);
+      if (mode === "workspace") assert.deepEqual(body.parameter[0].resource.parameter, declarations);
+      if (control === "operation-profile") {
+        assert.equal(body.parameter[1].valueCode, "operation");
+        const profile = JSON.parse(ui.node("operation-response").textContent);
+        const binary = profile.parameter.find((p: { name: string }) => p.name === "return");
+        assert.equal(binary.type, "Binary"); assert.equal(binary.extension.length, 1);
+        assert.match(binary.extension[0].valueCanonical, mode === "reference" ? /\/StructureDefinition\/result-/ : /^#result-/);
+      }
+    }
+  }
+  assert.ok(calls.every((c) => !c.path.includes("$sql-run") && !["PUT", "DELETE"].includes(c.method) && !(c.path.startsWith("/Library") && c.method === "POST")));
+  assert.equal(ui.store.get("Library", "not-saved"), undefined);
+});
+
 test("SQL workspace generates, saves and runs a parameterised Library and carries its values into FHIR operations", async (t) => {
   const ui = await uiFixture(t);
   ui.choose("table:patient");

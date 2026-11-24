@@ -3,7 +3,7 @@ import { EXT, RELATION, SOF_RELATION, SQLITE_CONTENT_TYPE, fail, sqliteContentTy
 import type { Artifact, FhirObject, Json } from "./fhir.js";
 import type { SqlColumn, SqlRelation, SqlSchema } from "./schema.js";
 import { sqliteNameKey } from "./schema.js";
-import { columnElement } from "./relation.js";
+import { columnElement, primitives, requireValid } from "./relation.js";
 import type { ColumnFacts, TypeEncoding } from "./relation.js";
 
 export interface ModelOptions {
@@ -98,7 +98,15 @@ export function relationBase(): Artifact {
     fhirVersion: "5.0.0", kind: "logical", abstract: true, type: RELATION,
     baseDefinition: "http://hl7.org/fhir/StructureDefinition/Base", derivation: "specialization",
     description: "Local experimental base for flat SQL relations; not an adopted SQL-on-FHIR artifact.",
-    differential: { element: [{ id: "Relation", path: "Relation", min: 0, max: "*" }] },
+    extension: [{ url: "http://hl7.org/fhir/StructureDefinition/structuredefinition-type-characteristics", valueCode: "can-be-target" }],
+    differential: { element: [{ id: "Relation", path: "Relation", min: 0, max: "*", constraint: [
+      { key: "rel-1", severity: "error", human: "Columns are direct children of the root.",
+        expression: "%resource.differential.element.tail().all(path.split('.').count() = 2)" },
+      { key: "rel-2", severity: "error", human: "Column names are SQL-safe identifiers.",
+        expression: "%resource.differential.element.tail().all(path.split('.').last().matches('^[A-Za-z_][A-Za-z0-9_]*$'))" },
+      { key: "rel-3", severity: "error", human: "Known columns have one FHIR primitive; only documented unknown result columns may omit type.",
+        expression: `%resource.differential.element.tail().all((type.count() = 1 and type.code in (${[...primitives].map((p) => `'${p}'`).join(" | ")})) or (type.empty() and comment.exists() and %resource.extension('${EXT}/relation-kind').value = 'result'))` },
+    ] }] },
   };
 }
 
@@ -172,6 +180,7 @@ export function createLogicalModels(schema: SqlSchema, options: ModelOptions = {
       ],
       differential: { element: elements },
     };
+    requireValid(model);
     return { model, table: table.name, columns };
   });
   const resources = [relationBase(), ...bindings.map((b) => b.model)];

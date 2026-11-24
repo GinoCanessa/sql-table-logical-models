@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { array, fail, object, text } from "./fhir.js";
+import { SQLITE_CONTENT_TYPE, array, fail, object, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
 import { QueryEngine, jsonResult } from "./engine.js";
 import type { PreparedResult, QueryResult } from "./engine.js";
 import { artifact, parameters } from "./store.js";
+import { verifyWire } from "./conformance.js";
 
 export const MEDIA = { json: "application/json", ndjson: "application/x-ndjson", csv: "text/csv" } as const;
 export type Format = keyof typeof MEDIA;
@@ -40,7 +41,7 @@ export function checkNames(parts: FhirObject[], allowed: string[], repeated: str
 export function queryParameters(query: URLSearchParams): FhirObject {
   const fields: Record<string, string> = {
     subjectCanonical: "valueCanonical", subjectReference: "valueReference",
-    _format: "valueCode", _limit: "valueInteger", header: "valueBoolean",
+    _format: "valueCode", _limit: "valueInteger", header: "valueBoolean", dialect: "valueCode",
   };
   return {
     resourceType: "Parameters",
@@ -70,9 +71,7 @@ function negotiate(parts: FhirObject[], accept?: string): { format: Format; enve
   return { format: (explicit ?? inferred) as Format, envelope: chosen.media === "application/fhir+json" };
 }
 
-export function parseRun(engine: QueryEngine, input: unknown, accept?: string): RunRequest {
-  const parts = parameters(input);
-  checkNames(parts, ["subjectCanonical", "subjectReference", "subjectResource", "parameters", "context", "_format", "header", "_limit"], ["context"]);
+function resolveSubject(engine: QueryEngine, parts: FhirObject[]) {
   const subjects = parts.filter((p) => ["subjectCanonical", "subjectReference", "subjectResource"].includes(String(p.name)));
   if (subjects.length !== 1) fail(400, "required", "Supply exactly one subjectCanonical, subjectReference or subjectResource");
   const subjectPart = subjects[0]!;
@@ -81,6 +80,24 @@ export function parseRun(engine: QueryEngine, input: unknown, accept?: string): 
     subjectPart.name === "subjectReference" ?
       engine.catalog.get(text(object(valueOf(subjectPart, "valueReference")).reference, "subjectReference.reference")) :
       engine.catalog.resolve(text(valueOf(subjectPart, "valueCanonical"), "subjectCanonical"));
+  return { subject, context, local: context.length > 0 || subjectPart.name === "subjectResource" };
+}
+
+export function parseDescribe(engine: QueryEngine, input: unknown) {
+  const parts = parameters(input);
+  checkNames(parts, ["subjectCanonical", "subjectReference", "subjectResource", "context", "_format", "dialect"], ["context"]);
+  const dialect = named(parts, "dialect");
+  if (dialect && valueOf(dialect, "valueCode") !== SQLITE_CONTENT_TYPE) fail(422, "not-supported", "Only SQLite can be described");
+  const selection = named(parts, "_format");
+  const format = selection ? valueOf(selection, "valueCode") : "json";
+  if (format !== "json" && format !== "sql" && format !== "operation") fail(400, "not-supported", "Unsupported describe format");
+  return { ...resolveSubject(engine, parts), format };
+}
+
+export function parseRun(engine: QueryEngine, input: unknown, accept?: string): RunRequest {
+  const parts = parameters(input);
+  checkNames(parts, ["subjectCanonical", "subjectReference", "subjectResource", "parameters", "context", "_format", "header", "_limit"], ["context"]);
+  const { subject, context } = resolveSubject(engine, parts);
   const bindingPart = named(parts, "parameters");
   const limitPart = named(parts, "_limit");
   const limit = limitPart ? valueOf(limitPart, "valueInteger") : undefined;
@@ -112,13 +129,14 @@ export function formatResult(result: PreparedResult | QueryResult, format: Forma
   return rows.length ? rows.join("\r\n") + "\r\n" : "";
 }
 
-export function runOperation(engine: QueryEngine, request: RunRequest): { contentType: string; body: string } {
+export function runOperation(engine: QueryEngine, request: RunRequest) {
   const result = engine.runPreparedBatch([request], request)[0]!;
   const body = formatResult(result, request.format, request.header);
   const contentType = MEDIA[request.format];
+  const issues = result.issues.concat(engine.settings.verifyOutput ? verifyWire(result, body, request.format, request.header) : []);
   return request.envelope ?
-    { contentType: "application/fhir+json", body: JSON.stringify({ resourceType: "Binary", contentType, data: Buffer.from(body).toString("base64") }) } :
-    { contentType, body };
+    { issues, contentType: "application/fhir+json", body: JSON.stringify({ resourceType: "Binary", contentType, data: Buffer.from(body).toString("base64") }) } :
+    { issues, contentType, body };
 }
 
 export interface ExportSubject {

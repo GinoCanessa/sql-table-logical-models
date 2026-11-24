@@ -14,6 +14,7 @@ export class OperationError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    readonly issues?: FhirObject[],
   ) {
     super(message);
   }
@@ -21,7 +22,7 @@ export class OperationError extends Error {
   outcome(): FhirObject {
     return {
       resourceType: "OperationOutcome",
-      issue: [{ severity: "error", code: this.code, diagnostics: this.message }],
+      issue: this.issues ?? [{ severity: "error", code: this.code, diagnostics: this.message }],
     };
   }
 }

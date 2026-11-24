@@ -45,13 +45,26 @@ export function sample(id: string) {
 
 export async function serverFixture(t: TestContext, options: Omit<ServerOptions, "database" | "artifacts"> = {}, extraSchema = "") {
   const setup = fixture(t, options.maxRows, extraSchema);
-  const app = createApp({ database: setup.database, artifacts: setup.artifacts, ...options });
-  app.server.listen(0, "127.0.0.1");
-  await once(app.server, "listening");
-  const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
-  setup.cleanup.push(async () => {
+  async function open() {
+    const app = createApp({ database: setup.database, artifacts: setup.artifacts, ...options });
+    app.server.listen(0, "127.0.0.1");
+    await once(app.server, "listening");
+    const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+    return { app, base };
+  }
+  let { app, base } = await open();
+  const close = async () => {
     await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
     app.close();
-  });
-  return { ...setup, base };
+  };
+  setup.cleanup.push(close);
+  return { ...setup, base, reopen: async () => {
+    await close();
+    ({ app, base } = await open());
+    return base;
+  } };
 }
+
+export const postBody = (body: unknown, extra: Record<string, string> = {}) => ({
+  method: "POST", headers: { "Content-Type": "application/fhir+json", ...extra }, body: JSON.stringify(body),
+});

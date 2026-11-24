@@ -1,15 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
-import { array, fail, object, text } from "./fhir.js";
+import { OperationError, RELATION, SOF_RELATION, array, fail, object, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
-import { readRelation } from "./relation.js";
+import { hasRelationBase, validateRelation } from "./relation.js";
 
 export const RESOURCE_TYPES = ["StructureDefinition", "Library", "ViewDefinition"];
-
-function interpret(resource: Artifact, issues?: FhirObject[]): Artifact {
-  const relation = readRelation(resource);
-  if (relation && issues) issues.push(...relation.issues);
-  return resource;
-}
 
 export function artifact(value: unknown, requireId = true): Artifact {
   const resource = object(value, "artifact");
@@ -55,7 +49,10 @@ export class ArtifactStore {
   }
 
   put(value: unknown, issues?: FhirObject[]): Artifact {
-    const resource = interpret(artifact(value), issues);
+    const resource = artifact(value);
+    if (issues && resource.resourceType === "StructureDefinition" && hasRelationBase(resource)) {
+      issues.push(...validateRelation(resource).map(advisory));
+    }
     try {
       this.db.prepare(`INSERT INTO artifacts(resource_type, id, url, version, json) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(resource_type, id) DO UPDATE SET url=excluded.url, version=excluded.version, json=excluded.json`)
@@ -78,10 +75,13 @@ export class ArtifactStore {
   }
 }
 
+const advisory = (i: FhirObject) => i.severity === "error" ? { ...i, severity: "warning" } : i;
+
 export class Catalog {
   constructor(
     readonly store: ArtifactStore,
     readonly generated: Artifact[],
+    readonly validation: "warn" | "error" = "warn",
   ) {}
 
   list(type?: string): Artifact[] {
@@ -92,18 +92,44 @@ export class Catalog {
     if (!/^(StructureDefinition|Library|ViewDefinition)\/[A-Za-z0-9.-]{1,64}$/.test(reference)) {
       fail(400, "invalid", "subjectReference must be a local ResourceType/id reference");
     }
-    return interpret(this.list().find((r) => `${r.resourceType}/${r.id}` === reference) ??
-      fail(404, "not-found", `Artifact not found: ${reference}`), issues);
+    return this.checked(this.list().find((r) => `${r.resourceType}/${r.id}` === reference) ??
+      fail(404, "not-found", `Artifact not found: ${reference}`), [], issues);
   }
 
-  resolve(canonical: string, context: Artifact[] = [], issues?: FhirObject[]): Artifact {
+  private find(canonical: string, context: Artifact[]): Artifact | undefined {
     const [url, version, extra] = canonical.split("|");
     if (!url || extra !== undefined || (canonical.includes("|") && !version)) fail(400, "invalid", "Invalid canonical reference");
     const match = (r: Artifact) => r.url === url && (version === undefined || r.version === version);
     const supplied = context.filter(match);
     const candidates = supplied.length ? supplied : this.list().filter(match);
     if (candidates.length > 1) fail(409, "conflict", `Ambiguous canonical; pin a unique version: ${canonical}`);
-    return interpret(candidates[0] ?? fail(404, "not-found", `Unresolved dependency: ${canonical}`), issues);
+    return candidates[0];
+  }
+
+  private checked(resource: Artifact, context: Artifact[], issues?: FhirObject[], observe?: (r: Artifact) => void): Artifact {
+    if (resource.resourceType !== "StructureDefinition") return resource;
+    const chain = [resource];
+    let current = resource;
+    while (!hasRelationBase(current)) {
+      if ([RELATION, SOF_RELATION].includes(String(current.url))) break;
+      if (typeof current.baseDefinition !== "string") return resource;
+      const parent = this.find(current.baseDefinition, context);
+      if (!parent || parent.resourceType !== "StructureDefinition") return resource;
+      if (chain.some((r) => r.url === parent.url && r.version === parent.version)) fail(422, "invalid", "Relation baseDefinition cycle");
+      observe?.(parent);
+      chain.push(parent);
+      current = parent;
+    }
+    const found = chain.flatMap(validateRelation);
+    if (this.validation === "error" && found.some((i) => i.severity === "error")) {
+      throw new OperationError(422, "invalid", "Invalid Relation", found);
+    }
+    issues?.push(...found.map(advisory));
+    return resource;
+  }
+
+  resolve(canonical: string, context: Artifact[] = [], issues?: FhirObject[], observe?: (r: Artifact) => void): Artifact {
+    return this.checked(this.find(canonical, context) ?? fail(404, "not-found", `Unresolved dependency: ${canonical}`), context, issues, observe);
   }
 
   put(value: unknown, issues?: FhirObject[]): Artifact {
@@ -113,7 +139,7 @@ export class Catalog {
       (resource.url && r.url === resource.url && r.version === resource.version))) {
       fail(409, "conflict", "Generated schema artifacts are read-only; change the database and restart");
     }
-    return this.store.put(resource, issues);
+    return this.store.put(this.checked(resource, [resource], issues));
   }
 }
 

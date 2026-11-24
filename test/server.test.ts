@@ -4,13 +4,14 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createApp } from "../src/server.js";
 import { EXT, RELATION, SOF_RELATION, array, object, sqlLibrary } from "../src/fhir.js";
-import type { FhirObject } from "../src/fhir.js";
+import type { Artifact, FhirObject } from "../src/fhir.js";
+import { checkRows } from "../src/conformance.js";
 import { fixture, serverFixture } from "./helpers.js";
 
 const headers = { "Content-Type": "application/fhir+json" };
 const post = (body: unknown, extra: Record<string, string> = {}) => ({ method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
 
-async function completedExport(base: string, input: unknown) {
+async function exportResult(base: string, input: unknown) {
   const kickoff = await fetch(`${base}/$sql-export`, post(input, { Prefer: "respond-async" }));
   assert.equal(kickoff.status, 202);
   assert.equal(await kickoff.text(), "");
@@ -26,6 +27,10 @@ async function completedExport(base: string, input: unknown) {
   }
   assert.equal(status.status, 303);
   const result = await fetch(status.headers.get("Location")!, { signal });
+  return { result, statusUrl: statusUrl! };
+}
+async function completedExport(base: string, input: unknown) {
+  const { result, statusUrl } = await exportResult(base, input);
   assert.equal(result.status, 200);
   const manifest = object(await result.json());
   assert.equal(manifest.resourceType, "Parameters");
@@ -36,11 +41,12 @@ async function completedExport(base: string, input: unknown) {
   const output = parts.filter((p) => p.name === "output");
   assert.equal(output.length, 1);
   const fields = array(output[0]!.part, "part").map((p) => object(p));
-  assert.deepEqual(fields.map((p) => p.name), ["name", "location"]); // No model part in this manifest version.
+  assert.deepEqual(fields.map((p) => p.name), ["name", "location", "model"]);
+  const modelUrl = String(fields[2]!.valueCanonical);
   const location = String(fields[1]!.valueUri);
   const file = await fetch(location);
   assert.equal(file.status, 200);
-  return { file, location, statusUrl: statusUrl!, parts };
+  return { file, location, modelUrl, statusUrl: statusUrl!, parts };
 }
 
 test("server manages artifacts and evaluates GET/POST sql-run in native and Binary formats", async (t) => {
@@ -106,7 +112,7 @@ test("system operation definitions declare all supported inputs and outputs, inc
       [...inputs, "in subject parts 1..*", ...["name string", ...subject].map((s) => `in subject.${s} 0..1`),
         "in clientTrackingId string 0..1", "out exportId string 1..1", "out status code 1..1", "out location uri 1..1",
         "out clientTrackingId string 0..1", "out _format code 0..1", "out exportStartTime instant 0..1", "out exportEndTime instant 0..1",
-        "out output parts 0..*", "out output.name string 1..1", "out output.location uri 1..*"];
+        "out output parts 0..*", "out output.name string 1..1", "out output.location uri 1..*", "out output.model canonical 1..1"];
     assert.deepEqual(actual.sort(), expected.sort());
   }
 });
@@ -114,6 +120,7 @@ test("system operation definitions declare all supported inputs and outputs, inc
 test("uploaded draft Relations retain advisory metadata but cannot bind to a physical source", async (t) => {
   const { base } = await serverFixture(t);
   const model = { resourceType: "StructureDefinition", id: "unbound", url: "https://example.org/external", baseDefinition: SOF_RELATION,
+    kind: "logical", derivation: "specialization", abstract: false, type: "https://example.org/external",
     name: "patient", extension: [{ url: `${EXT}/relation-source`, valueAttachment: { url: "urn:example:inert" } }],
     differential: { element: [{ path: "patient" }, { path: "patient.id", type: [{ code: "integer64" }] }] } };
   const path = "/StructureDefinition/unbound";
@@ -139,14 +146,16 @@ test("uploaded draft Relations retain advisory metadata but cannot bind to a phy
 });
 
 test("typed integers and integral decimals agree across run and completed export", async (t) => {
-  const { base } = await serverFixture(t, { typeEncoding: "extension", relationBase: "sof" }, `
+  const { base } = await serverFixture(t, { typeEncoding: "extension", relationBase: "sof", verifyOutput: true }, `
     CREATE TABLE wire(id INTEGER, cost DECIMAL(10,2), note TEXT);
-    INSERT INTO wire VALUES (7,40,'a,"b"'),(9223372036854775807,NULL,NULL);`);
+    INSERT INTO wire VALUES (7,40,'a,"b"
+c'),(9223372036854775807,NULL,NULL);`);
   const query = sqlLibrary("wire", "SELECT id AS wide, 1+1 AS narrow, cost, note FROM wire ORDER BY id", []);
   query.parameter = [{ name: "narrow", use: "out", type: "integer" }];
   const subject = { name: "subjectResource", resource: query };
-  const rows = [{ wide: "7", narrow: 2, cost: 40, note: 'a,"b"' }, { wide: "9223372036854775807", narrow: 2, cost: null, note: null }];
-  const csv = '7,2,40,"a,""b"""\r\n9223372036854775807,2,,\r\n';
+  const rows = [{ wide: "7", narrow: 2, cost: 40, note: 'a,"b"\nc' }, { wide: "9223372036854775807", narrow: 2, cost: null, note: null }];
+  const csv = '7,2,40,"a,""b""\nc"\r\n9223372036854775807,2,,\r\n';
+  const described = await (await fetch(`${base}/$sql-describe`, post({ resourceType: "Parameters", parameter: [subject] }))).json();
   for (const [format, header, expected] of [
     ["json", true, JSON.stringify(rows)], ["ndjson", true, rows.map((r) => JSON.stringify(r) + "\n").join("")],
     ["csv", true, "wide,narrow,cost,note\r\n" + csv], ["csv", false, csv],
@@ -154,14 +163,107 @@ test("typed integers and integral decimals agree across run and completed export
     const common = [{ name: "_format", valueCode: format }, { name: "header", valueBoolean: header }];
     const run = await fetch(`${base}/$sql-run`, post({ resourceType: "Parameters", parameter: [subject, ...common] }));
     assert.equal(run.status, 200);
-    const { file, parts } = await completedExport(base, { resourceType: "Parameters", parameter: [
+    const { file, parts, modelUrl } = await completedExport(base, { resourceType: "Parameters", parameter: [
       { name: "subject", part: [subject] }, ...common, { name: "clientTrackingId", valueString: "batch1" },
     ] });
+    assert.deepEqual(await (await fetch(`${base}/StructureDefinition/${modelUrl.split("/").at(-1)}`)).json(), described);
     assert.equal(parts.find((p) => p.name === "clientTrackingId")?.valueString, "batch1");
     assert.equal(parts.find((p) => p.name === "_format")?.valueCode, format);
     for (const name of ["exportStartTime", "exportEndTime"]) assert.ok(Number.isFinite(Date.parse(String(parts.find((p) => p.name === name)?.valueInstant))));
     for (const response of [run, file]) assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(expected));
   }
+});
+
+test("verify-output catches required NULL in run and export; declared SQLite length is a nonfatal row warning", async (t) => {
+  for (const verifyOutput of [false, true]) {
+    const { base } = await serverFixture(t, { verifyOutput }, "CREATE TABLE short_name(n VARCHAR(3) NOT NULL); INSERT INTO short_name VALUES ('four')");
+    const query = sqlLibrary("required", "SELECT NULL AS required_id", []);
+    query.parameter = [{ name: "required_id", use: "out", type: "integer64", min: 1, max: "1" }];
+    const invoke = (resource: Artifact) => {
+      const subject = { name: "subjectResource", resource };
+      const format = { name: "_format", valueCode: "csv" };
+      return {
+        run: () => fetch(`${base}/$sql-run`, post({ resourceType: "Parameters", parameter: [subject, format] })),
+        export: { resourceType: "Parameters", parameter: [{ name: "subject", part: [subject] }, format] },
+      };
+    };
+    const invalid = invoke(query);
+    const response = await invalid.run();
+    assert.equal(response.status, verifyOutput ? 422 : 200);
+    const { result, statusUrl } = await exportResult(base, invalid.export);
+    assert.equal(result.status, verifyOutput ? 422 : 200);
+    if (verifyOutput) {
+      assert.match(await response.text(), /Required column is NULL/);
+      assert.match(await result.text(), /Required column is NULL/);
+      assert.equal((await fetch(statusUrl.replace(/status$/, "required.csv"))).status, 404);
+    }
+    const view: Artifact = { resourceType: "ViewDefinition", id: "short-name", name: "ShortName", resource: "short_name",
+      select: [{ column: [{ name: "label", path: "n" }] }] };
+    const search = await (await fetch(base + "/StructureDefinition")).json() as { entry: { resource: Artifact }[] };
+    view.extension = [{ url: `${EXT}/source`, valueCanonical: search.entry.find((e) => e.resource.name === "short_name")!.resource.url }];
+    const valid = invoke(view);
+    const successful = await valid.run();
+    const { file } = await completedExport(base, valid.export);
+    for (const response of [successful, file]) {
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("X-Relation-Issue-Count"), verifyOutput ? "1" : null);
+      assert.equal(response.headers.get("X-Relation-Warning-Count"), verifyOutput ? "1" : null);
+      assert.equal(await response.text(), "label\r\nfour\r\n");
+    }
+    const fromLibrary = await invoke(sqlLibrary("short", "SELECT n AS label FROM short_name", [])).run();
+    assert.equal(fromLibrary.status, 200);
+    assert.equal(fromLibrary.headers.get("X-Relation-Issue-Count"), null);
+  }
+});
+
+test("each exported subject has an immutable model paired with its bytes after dependency replacement and restart", async (t) => {
+  const setup = await serverFixture(t, { verifyOutput: true });
+  let base = setup.base;
+  const dep = sqlLibrary("shared", "SELECT id AS value FROM patient ORDER BY id", [], "sql-view"); dep.version = "1";
+  setup.store.put(dep);
+  const pinned = sqlLibrary("pinned", "SELECT * FROM dep", [{ label: "dep", resource: dep.url + "|1" }]); pinned.version = "2";
+  setup.store.put(pinned);
+  const local = sqlLibrary("request-only", "SELECT name FROM patient", [], "sql-view");
+  const inline = sqlLibrary("consumer", "SELECT * FROM other", [{ label: "other", resource: local.url! }]);
+  const context = { name: "context", resource: local };
+  const subjects = [{ name: "subjectCanonical", valueCanonical: pinned.url + "|2" }, { name: "subjectResource", resource: inline }];
+  const describes = await Promise.all(subjects.map(async (subject, i) => await (await fetch(base + "/$sql-describe", post({
+    resourceType: "Parameters", parameter: [subject, ...(i ? [context] : [])],
+  }))).json() as Artifact));
+  const input = { resourceType: "Parameters", parameter: [...subjects.map((s, i) => ({ name: "subject", part: [
+    { name: "name", valueString: `file${i}` }, s] })), context, { name: "_format", valueCode: "json" }] };
+  const { result, statusUrl } = await exportResult(base, input);
+  assert.equal(result.status, 200);
+  const outputs = array(object(await result.json()).parameter, "parameter").map((p) => object(p)).filter((p) => p.name === "output");
+  assert.equal(outputs.length, 2);
+  const files = await Promise.all(outputs.map(async (p, i) => {
+    const fields = array(p.part, "part").map((v) => object(v));
+    assert.deepEqual(fields.map((f) => f.name), ["name", "location", "model"]);
+    assert.equal(fields[0]!.valueString, `file${i}`);
+    assert.equal(fields[2]!.valueCanonical, describes[i]!.url);
+    const path = new URL(String(fields[1]!.valueUri)).pathname;
+    const body = await (await fetch(base + path)).text();
+    assert.deepEqual(checkRows(describes[i]!, JSON.parse(body)), []);
+    return { path, body };
+  }));
+  const second = await exportResult(base, input);
+  assert.equal(second.result.status, 200);
+  assert.equal((await fetch(second.statusUrl, { method: "DELETE" })).status, 202);
+  setup.store.put({ ...sqlLibrary("shared", "SELECT name AS label FROM patient", [], "sql-view"), version: "1" });
+  base = await setup.reopen();
+  const current = await (await fetch(`${base}/$sql-describe?subjectReference=Library/pinned`)).json() as Artifact;
+  assert.notEqual(current.url, describes[0]!.url);
+  for (const [i, model] of describes.entries()) {
+    assert.deepEqual(await (await fetch(`${base}/StructureDefinition/${model.id}`)).json(), model);
+    const search = object(await (await fetch(`${base}/StructureDefinition?url=${encodeURIComponent(model.url!)}`)).json());
+    assert.equal(search.total, 1);
+    assert.deepEqual(object(array(search.entry, "entry")[0]).resource, model);
+    assert.equal(await (await fetch(base + files[i]!.path)).text(), files[i]!.body);
+  }
+  assert.equal(setup.store.get("Library", local.id), undefined);
+  assert.equal((await fetch(base + new URL(statusUrl).pathname, { method: "DELETE" })).status, 202);
+  assert.equal((await fetch(base + files[0]!.path)).status, 404);
+  assert.equal((await fetch(`${base}/StructureDefinition/${describes[0]!.id}`)).status, 404);
 });
 
 test("an asserted integer range cannot silently round or overflow JSON; CSV still uses raw cells", async (t) => {
@@ -230,4 +332,19 @@ test("sql-export validates before acceptance and persists manifests/downloads un
     { name: "name", valueString: "bad" }, { name: "subjectResource", resource: sqlLibrary("bad", "SELECT * FROM no_such_table", []) },
   ] }] };
   assert.equal((await fetch(`${base}/$sql-export`, post(bad, { Prefer: "respond-async" }))).status, 422);
+});
+
+test("empty completed files match prepared column order in each format with and without CSV headers", async (t) => {
+  const { base } = await serverFixture(t, { verifyOutput: true });
+  const subject = { name: "subjectResource", resource: sqlLibrary("empty-files", "SELECT cost, id AS visit_id FROM visit WHERE 0", []) };
+  const model = await (await fetch(base + "/$sql-describe", post({ resourceType: "Parameters", parameter: [subject] }))).json() as Artifact;
+  assert.deepEqual(checkRows(model, [], ["cost", "visit_id"]), []);
+  for (const [format, header, expected] of [["json", true, "[]"], ["ndjson", true, ""], ["csv", true, "cost,visit_id\r\n"], ["csv", false, ""]] as const) {
+    const options = [{ name: "_format", valueCode: format }, { name: "header", valueBoolean: header }];
+    const run = await fetch(base + "/$sql-run", post({ resourceType: "Parameters", parameter: [subject, ...options] }));
+    const completed = await completedExport(base, { resourceType: "Parameters", parameter: [{ name: "subject", part: [subject] }, ...options] });
+    assert.equal(completed.modelUrl, model.url);
+    assert.equal(run.status, 200); assert.equal(await run.text(), expected);
+    assert.equal(await completed.file.text(), expected);
+  }
 });

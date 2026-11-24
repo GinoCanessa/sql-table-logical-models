@@ -88,7 +88,7 @@
             </details>
             <label for="sql-editor">SQL statement</label><textarea id="sql-editor" class="code-editor sql-editor" rows="12" spellcheck="false">SELECT 1 AS example;</textarea>
             <details><summary>Query parameters</summary>
-              <p class="help">Declarations are a Library.parameter array. For example: <code>[{"name":"minimum_cost","type":"decimal","use":"in","min":0,"max":"1"}]</code>. Use <code>:minimum_cost</code> in SQL.</p>
+              <p class="help">Use <code>use: "in"</code> for a named SQL placeholder such as <code>:minimum_cost</code>. Use <code>{"name":"total","type":"decimal","use":"out","min":1,"max":"1"}</code> to declare an output alias; do not supply it as an input value.</p>
               <label for="parameter-declarations">Parameter declarations (JSON array)</label><textarea id="parameter-declarations" class="code-editor" rows="5" spellcheck="false">[]</textarea>
               <label for="sql-parameters">Input values (FHIR Parameters)</label><textarea id="sql-parameters" class="code-editor" rows="6" spellcheck="false">{"resourceType":"Parameters","parameter":[]}</textarea>
             </details>
@@ -120,7 +120,8 @@
               <label for="operation-parameters">Input values (FHIR Parameters; Library subjects only)</label><textarea id="operation-parameters" class="code-editor" rows="6" spellcheck="false">{"resourceType":"Parameters","parameter":[]}</textarea>
               <label for="operation-context">Inline context (JSON array)</label><textarea id="operation-context" class="code-editor" rows="6" spellcheck="false">[]</textarea>
             </details>
-            <div class="toolbar"><button type="button" id="build-operation">Build request</button><button type="button" id="send-operation" class="primary">Send operation</button><label class="check"><input id="use-edited-request" type="checkbox"> Send edited JSON below instead of form values</label></div>
+            <div class="toolbar"><button type="button" id="build-operation">Build request</button><button type="button" id="send-operation" class="primary">Send operation</button><button type="button" id="describe-result">Describe result</button><button type="button" id="operation-profile">Operation profile</button><label class="check"><input id="use-edited-request" type="checkbox"> Send edited JSON below instead of form values</label></div>
+            <p class="help">Describe uses the selected subject and context only. It prepares the query without reading rows, binding input values or saving a Library. Operation profile describes this subject’s system-level $sql-run.</p>
             <p class="help">The builder handles one export subject. For multiple subjects or additional supported parameters, edit the request JSON and enable &ldquo;Send edited JSON&rdquo;.</p>
             <pre id="operation-http" tabindex="0" aria-label="Operation HTTP request">POST /$sql-run</pre>
             <label for="operation-request">FHIR Parameters request body</label><textarea id="operation-request" class="code-editor" rows="16" spellcheck="false" placeholder="Build a request or paste a Parameters resource."></textarea>

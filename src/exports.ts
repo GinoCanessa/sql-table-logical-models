@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { OperationError, fail } from "./fhir.js";
-import type { FhirObject } from "./fhir.js";
+import type { Artifact, FhirObject } from "./fhir.js";
+import { verifyWire } from "./conformance.js";
 import type { QueryEngine } from "./engine.js";
 import { MEDIA, assignedId, formatResult } from "./operations.js";
 import type { ExportSubject } from "./operations.js";
@@ -9,7 +10,8 @@ interface Job {
   state: "running" | "complete" | "failed";
   errorStatus?: number;
   result: FhirObject | null;
-  files: Record<string, { contentType: string; body: string }>;
+  files: Record<string, { contentType: string; body: string; issues?: FhirObject[] }>;
+  models?: Artifact[];
 }
 
 export class ExportJobs {
@@ -39,6 +41,12 @@ export class ExportJobs {
     return row ? JSON.parse(String(row.json)) as Job : fail(404, "not-found", "Export not found");
   }
 
+  snapshots(): Artifact[] {
+    // Query only model JSON, not every job's (potentially large) files.
+    return this.db.prepare(`SELECT DISTINCT m.value AS model FROM export_jobs j, json_each(j.json, '$.models') m`)
+      .all().map((row) => JSON.parse(String(row.model)) as Artifact);
+  }
+
   start(subjects: ExportSubject[], base: string, trackingId?: string): string {
     const id = assignedId();
     const transactionTime = new Date().toISOString();
@@ -54,16 +62,19 @@ export class ExportJobs {
         const outputs = subjects.map(({ name, request }, index) => {
           const result = results[index]!;
           const filename = `${name}.${request.format}`;
-          files[filename] = { contentType: MEDIA[request.format], body: formatResult(result, request.format, request.header) };
+          const body = formatResult(result, request.format, request.header);
+          const issues = result.issues.concat(this.engine.settings.verifyOutput ? verifyWire(result, body, request.format, request.header) : []);
+          files[filename] = { contentType: MEDIA[request.format], body, ...(issues.length ? { issues } : {}) };
           return {
             name: "output", part: [
               { name: "name", valueString: name },
               { name: "location", valueUri: `${base}/$sql-export/${id}/${filename}` },
+              { name: "model", valueCanonical: result.contract.model.url },
             ],
           };
         });
         this.save(id, {
-          state: "complete", files,
+          state: "complete", files, models: results.map((r) => r.contract.model),
           result: {
             resourceType: "Parameters",
             parameter: [

@@ -5,6 +5,7 @@ import type { QueryEngine, QueryResult } from "./engine.js";
 import { artifact } from "./store.js";
 import { quoteIdentifier } from "./schema.js";
 import type { SqlRelation, SqlSchema } from "./schema.js";
+import { primitives } from "./relation.js";
 
 export interface PlaygroundArtifact {
   reference: string;
@@ -144,14 +145,15 @@ export function generateLibrary(value: unknown, baseUrl: string): Artifact {
   else if (input.version !== undefined) resource.version = text(input.version, "version");
   const names = new Set<string>();
   const types = ["string", "integer", "integer64", "decimal", "boolean", "date", "dateTime"];
-  resource.parameter = array(input.parameters, "parameters").map((value) => {
+  resource.parameter = array(input.parameters === undefined ? source?.parameter : input.parameters, "parameters").map((value) => {
     const parameter = object(value, "parameter");
     const name = text(parameter.name, "parameter.name");
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || names.has(name)) fail(400, "invalid", `Invalid or duplicate query parameter: ${name}`);
-    names.add(name);
-    if (!types.includes(String(parameter.type)) || parameter.use !== "in" ||
+    const key = `${parameter.use}:${name}`;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || names.has(key)) fail(400, "invalid", `Invalid or duplicate query parameter: ${name}`);
+    names.add(key);
+    if (!(parameter.use === "in" ? types.includes(String(parameter.type)) : parameter.use === "out" && primitives.has(String(parameter.type))) ||
       (parameter.min !== undefined && parameter.min !== 0 && parameter.min !== 1) ||
-      (parameter.max !== undefined && parameter.max !== "1")) fail(400, "not-supported", "Parameters must declare supported scalar input types (min 0/1, max 1)");
+      (parameter.max !== undefined && parameter.max !== "1" && !(parameter.use === "out" && parameter.max === "*"))) fail(400, "not-supported", "Unsupported Library parameter type, use or cardinality");
     return parameter;
   });
   return artifact(resource);
