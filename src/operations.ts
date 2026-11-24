@@ -116,8 +116,8 @@ export function parseRun(engine: QueryEngine, input: unknown, accept?: string): 
 
 export function formatResult(result: PreparedResult | QueryResult, format: Format, header: boolean): string {
   if (format !== "csv") {
-    const { rows } = "descriptors" in result ? jsonResult(result) : result;
-    return format === "json" ? JSON.stringify(rows) : rows.map((r) => JSON.stringify(r) + "\n").join("");
+    const { columns, rows } = "descriptors" in result ? jsonResult(result) : result;
+    return format === "json" ? JSON.stringify(rows, columns) : rows.map((r) => JSON.stringify(r, columns) + "\n").join("");
   }
   const columns = "descriptors" in result ? result.descriptors.map((c) => c.name) : result.columns;
   const csv = (value: unknown) => {

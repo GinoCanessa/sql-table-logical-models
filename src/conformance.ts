@@ -24,12 +24,13 @@ function inspectRows(model: Artifact, rows: readonly unknown[], columns: readonl
   const report = (diagnostics: string, path: string, severity = "error") =>
     issues.push({ severity, code: severity === "information" ? "informational" : "invalid", diagnostics, expression: [path] });
   const names = relation.columns.map((c) => c.physicalName);
+  const members = new Set(names);
   if (columns && !isDeepStrictEqual(columns, names)) report("Missing, extra or reordered descriptor columns", "columns");
   for (const c of relation.columns) if (!c.primitive) report(`Partial typing: ${c.name} is unknown`, c.name, "information");
   rows.forEach((row, index) => {
     const path = `row[${index}]`;
-    if (!row || typeof row !== "object" || Array.isArray(row) || !isDeepStrictEqual(Object.keys(row), names)) {
-      report("Missing, extra or reordered row columns", path); return;
+    if (!row || typeof row !== "object" || Array.isArray(row) || !isDeepStrictEqual(new Set(Object.keys(row)), members)) {
+      report("Missing or extra row columns", path); return;
     }
     for (const c of relation.columns) {
       const cell: unknown = (row as Record<string, unknown>)[c.physicalName], location = `${path}.${c.name}`;
@@ -91,11 +92,13 @@ export function checkWire(model: Artifact, result: PreparedResult, body: string,
       if (header) records.unshift(columns);
       if (!isDeepStrictEqual(csvRecords(body), records)) throw new Error("CSV header, cell or record order mismatch");
     } else {
-      const expected = jsonResult(result);
-      const rows: unknown = format === "json" ? JSON.parse(body) : body === "" ? [] :
-        body.replace(/\r?\n$/, "").split(/\r?\n/).map((line) => JSON.parse(line));
-      if (!Array.isArray(rows) || !isDeepStrictEqual(rows, expected.rows)) throw new Error("JSON records differ from prepared rows");
+      const { rows } = jsonResult(result);
       issues.push(...checkRows(model, rows, columns));
+      // Parsing loses the wire order of integer-index names. Compare compact records one member at a time.
+      const records = rows.map((row) => "{" + columns.map((name) =>
+        `${JSON.stringify(name)}:${JSON.stringify(row[name])}`).join(",") + "}");
+      const expected = format === "json" ? `[${records.join(",")}]` : records.map((record) => record + "\n").join("");
+      if (body !== expected) throw new Error("JSON member, value or record order mismatch");
     }
   } catch (err) {
     issues.push({ severity: "error", code: "invalid", diagnostics: String(err) });

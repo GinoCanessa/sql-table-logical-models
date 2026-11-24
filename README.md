@@ -74,6 +74,8 @@ Migrate readers away from the old column-level `sql-type.valueString`, `sqlite-a
 
 **JSON/NDJSON change:** Run and export now write every modeled `integer64` as a decimal string, including `"1"`. Modeled `integer` and `decimal` are numbers; `40` remains a number for an integral cost. SQL NULL remains `null`. An untyped expression still uses its SQLite storage value, not a guessed type. CSV retains its raw fields, optional headers, quoting and CRLF. The completed export manifest distinguishes its top-level polling `location` from each file's `output.location`.
 
+Run responses and export files emit columns in the described order in all three formats. For `SELECT 'A' AS label, 'B' AS "2025"`, `label` comes first on the wire. After JSON parsing, JavaScript's `Object.keys(row)` lists `"2025"` first. Use the model's ordered physical column names (or `QueryResult.columns` in TypeScript) to read cells by position.
+
 ## Describe before running
 
 ```powershell

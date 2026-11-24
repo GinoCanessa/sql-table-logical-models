@@ -252,24 +252,52 @@ test("conformance checks ordered descriptors, exact primitive cells, collections
   assert.deepEqual(rows, [{ i: 0, flag: false, bytes: "AP8=", wide: "7", optional: null, label: ["four"], unknown: 1 }]);
   assert.deepEqual(checkRows(model, rows, columns).map((i) => i.severity), ["information"]);
   const row = rows[0]!;
-  for (const bad of [Object.fromEntries(Object.entries(row).slice(1)), { ...row, extra: "" }, Object.fromEntries(Object.entries(row).reverse()),
+  assert.deepEqual(checkRows(model, [Object.fromEntries(Object.entries(row).reverse())], columns), checkRows(model, rows, columns));
+  const missing = Object.fromEntries(Object.entries(row).slice(1));
+  for (const bad of [missing, Object.assign(Object.create(row), missing), { ...row, extra: "" },
     { ...row, i: "0" }, { ...row, i: 2147483648 }, { ...row, flag: 0 }, { ...row, bytes: "!" }, { ...row, wide: 7 },
     { ...row, wide: "9223372036854775808" }, { ...row, label: "four" }, { ...row, label: [""] }, { ...row, label: [null] }, { ...row, flag: null }]) {
     assert.ok(checkRows(model, [bad]).some((i) => i.severity === "error"), JSON.stringify(bad));
   }
   assert.ok(checkRows(model, [], columns.slice(1)).some((i) => i.severity === "error"));
+  assert.ok(checkRows(model, rows, columns.toReversed()).some((i) => i.severity === "error"));
+  const empty = engine.runPreparedBatch([{ subject: query }], { limit: 0 })[0]!;
   for (const format of ["json", "ndjson", "csv"] as const) {
     const wire = formatResult(result, format, true);
     assert.deepEqual(checkWire(model, result, wire, format, true).map((i) => i.severity), ["information"]);
     assert.ok(checkWire(model, result, wire.replace("four", "five"), format, true).some((i) => i.severity === "error"));
-    const empty = engine.runPreparedBatch([{ subject: query }], { limit: 0 })[0]!;
     for (const header of [true, false]) {
-      assert.deepEqual(checkWire(model, empty, formatResult(empty, format, header), format, header).map((i) => i.severity), ["information"]);
+      const body = format === "json" ? "[]" : format === "csv" && header ? columns.join(",") + "\r\n" : "";
+      assert.equal(formatResult(empty, format, header), body);
+      assert.deepEqual(checkWire(model, empty, body, format, header).map((i) => i.severity), ["information"]);
     }
+    const reversed = { ...empty, descriptors: empty.descriptors.toReversed() };
+    assert.ok(checkWire(model, reversed, format === "json" ? "[]" : "", format, false).some((i) => i.severity === "error"));
   }
   const exact = sqlLibrary("exact", "SELECT 9223372036854775807 AS amount", []);
   exact.parameter = [{ name: "amount", use: "out", type: "decimal" }];
   const decimal = engine.runPreparedBatch([{ subject: exact }])[0]!;
   assert.throws(() => formatResult(decimal, "json", false), /lossless finite JSON/);
   assert.deepEqual(checkWire(decimal.contract.model, decimal, "9223372036854775807\r\n", "csv", false), []);
+});
+
+test("wire checks distinguish physical member and record order even for escaped and numeric aliases", (t) => {
+  const { engine } = fixture(t);
+  const query = sqlLibrary("order", `SELECT 'A' AS "la""bel", 'B' AS "2025" UNION ALL SELECT 'C,"D"' || char(10) || 'E', 'F'`, []);
+  const result = engine.runPreparedBatch([{ subject: query }])[0]!;
+  const publicResult = engine.run(query);
+  const first = String.raw`{"la\"bel":"A","2025":"B"}`, second = String.raw`{"la\"bel":"C,\"D\"\nE","2025":"F"}`;
+  const reversedFirst = String.raw`{"2025":"B","la\"bel":"A"}`, reversedSecond = String.raw`{"2025":"F","la\"bel":"C,\"D\"\nE"}`;
+  const header = '"la""bel",2025\r\n', csv = 'A,B\r\n"C,""D""\nE",F\r\n';
+  for (const [format, withHeader, valid, corrupt] of [
+    ["json", true, `[${first},${second}]`, [`[${reversedFirst},${second}]`, `[${second},${first}]`, `[${first}]`]],
+    ["ndjson", true, `${first}\n${second}\n`, [`${reversedFirst}\n${second}\n`, `${first}\n${reversedSecond}\n`]],
+    ["csv", true, header + csv, ['2025,"la""bel"\r\n' + csv]],
+    ["csv", false, csv, [csv.replace("A,B", "B,A")]],
+  ] as const) {
+    for (const input of [result, publicResult]) assert.equal(formatResult(input, format, withHeader), valid);
+    const errors = (body: string) => checkWire(result.contract.model, result, body, format, withHeader).filter((i) => i.severity === "error");
+    assert.deepEqual(errors(valid), []);
+    for (const body of corrupt) assert.ok(errors(body).length, body);
+  }
 });

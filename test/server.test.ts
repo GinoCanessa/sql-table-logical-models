@@ -177,6 +177,27 @@ c'),(9223372036854775807,NULL,NULL);`);
   }
 });
 
+test("verified run and completed export emit numeric aliases in described order in every format", async (t) => {
+  const { base } = await serverFixture(t, { verifyOutput: true });
+  const subject = { name: "subjectResource", resource: sqlLibrary("ordered", `SELECT 'A' AS label, 'B' AS "2025"`, []) };
+  const describe = await fetch(`${base}/$sql-describe`, post({ resourceType: "Parameters", parameter: [subject] }));
+  assert.equal(describe.status, 200);
+  const model = await describe.json() as Artifact;
+  assert.deepEqual(readRelation(model)!.columns.map((c) => c.physicalName), ["label", "2025"]);
+  for (const [format, header, bytes] of [
+    ["json", true, '[{"label":"A","2025":"B"}]'], ["ndjson", true, '{"label":"A","2025":"B"}\n'],
+    ["csv", true, "label,2025\r\nA,B\r\n"], ["csv", false, "A,B\r\n"],
+  ] as const) {
+    const options = [{ name: "_format", valueCode: format }, { name: "header", valueBoolean: header }];
+    const run = await fetch(`${base}/$sql-run`, post({ resourceType: "Parameters", parameter: [subject, ...options] }));
+    assert.equal(run.status, 200);
+    const { file, modelUrl } = await completedExport(base, { resourceType: "Parameters", parameter: [{ name: "subject", part: [subject] }, ...options] });
+    assert.equal(modelUrl, model.url);
+    assert.deepEqual(await (await fetch(`${base}/StructureDefinition/${model.id}`)).json(), model);
+    for (const response of [run, file]) assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(bytes, "utf8"));
+  }
+});
+
 test("verified JSON run and download distinguish mixed storage from a declared integer64 projection", async (t) => {
   const { base } = await serverFixture(t, { verifyOutput: true },
     "CREATE TABLE readings(v); INSERT INTO readings VALUES (7), ('text'), (NULL)");
