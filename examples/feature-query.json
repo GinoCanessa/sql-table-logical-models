@@ -1,0 +1,26 @@
+{
+  "resourceType": "Parameters",
+  "parameter": [
+    {
+      "name": "feature",
+      "part": [
+        { "name": "definition", "valueCanonical": "https://example.org/sql-table-logical-models/FeatureDefinition/operation-profile" },
+        { "name": "context", "valueString": "https://example.org/sql/Library/patient-visits" }
+      ]
+    },
+    {
+      "name": "feature",
+      "part": [
+        { "name": "definition", "valueCanonical": "https://example.org/sql-table-logical-models/FeatureDefinition/result-model" },
+        { "name": "context", "valueString": "Library/patient-visits" }
+      ]
+    },
+    {
+      "name": "feature",
+      "part": [
+        { "name": "definition", "valueCanonical": "https://example.org/sql-table-logical-models/FeatureDefinition/integer64-json" },
+        { "name": "value", "valueCode": "string" }
+      ]
+    }
+  ]
+}

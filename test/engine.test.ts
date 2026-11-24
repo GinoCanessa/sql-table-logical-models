@@ -9,6 +9,8 @@ import { ArtifactStore } from "../src/store.js";
 import { extractSql, singleStatement } from "../src/engine.js";
 import { ExportJobs } from "../src/exports.js";
 import { join } from "node:path";
+import { checkRows, checkWire } from "../src/conformance.js";
+import { formatResult } from "../src/operations.js";
 
 const errorCode = (status: number) => (error: unknown) => error instanceof OperationError && error.status === status;
 
@@ -17,7 +19,7 @@ test("canonical relations, ViewDefinition and nested SQLViews compose with bound
   const result = engine.run(catalog.get("Library/patient-visits"), {
     parameters: { resourceType: "Parameters", parameter: [{ name: "minimum_cost", valueDecimal: 25 }] },
   });
-  assert.deepEqual(result.rows, [{ patient_id: 1, patient_name: "Example One", visit_id: 10, occurred_on: "2026-01-10", cost: 40.5 }]);
+  assert.deepEqual(result.rows, [{ patient_id: "1", patient_name: "Example One", visit_id: "10", occurred_on: "2026-01-10", cost: 40.5 }]);
   assert.equal(engine.run(catalog.get("Library/patient-visits")).rows.length, 2);
   const model = engine.bindings.find((b) => b.table === "visit_totals")!.model;
   assert.deepEqual(engine.run(sqlLibrary("totals", "SELECT visit_count FROM totals ORDER BY patient_id", [{ label: "totals", resource: model.url! }])).rows, [
@@ -78,12 +80,50 @@ test("row caps, zero limits, empty result columns, BLOBs and large integers reta
   const { engine } = fixture(t, 2);
   const query = sqlLibrary("rows", "SELECT id FROM visit ORDER BY id", []);
   assert.throws(() => engine.run(query), /exceeds 2 rows/);
-  assert.deepEqual(engine.run(query, { limit: 1 }).rows, [{ id: 10 }]);
+  assert.deepEqual(engine.run(query, { limit: 1 }).rows, [{ id: "10" }]);
   assert.deepEqual(engine.run(query, { limit: 0 }), { columns: ["id"], rows: [] });
   assert.throws(() => engine.run(query, { limit: 3 }), errorCode(400));
   assert.deepEqual(engine.run(sqlLibrary("empty", "SELECT name FROM patient WHERE 0", [])), { columns: ["name"], rows: [] });
   assert.deepEqual(engine.run(sqlLibrary("values", "SELECT 9223372036854775807 AS big, x'00ff' AS bytes, NULL AS missing", [])).rows,
     [{ big: "9223372036854775807", bytes: "AP8=", missing: null }]);
+});
+
+test("prepared origins survive aliases and output declarations are not input placeholders", (t) => {
+  const { engine } = fixture(t);
+  const view = sqlLibrary("declared", "SELECT id AS original FROM patient", [], "sql-view");
+  view.version = "1";
+  view.parameter = [{ use: "out", name: "original", type: "integer64" }];
+  const subject = sqlLibrary("mixed", "SELECT dep.original AS alias, :n + 1 AS expr, 1 AS unknown FROM dep JOIN again USING (original) ORDER BY alias", [
+    { label: "dep", resource: view.url! }, { label: "again", resource: `${view.url}|1` },
+  ]);
+  subject.parameter = [{ use: "out", name: "expr", type: "integer64" }, { use: "in", name: "n", type: "integer" }];
+  const parameters = { resourceType: "Parameters", parameter: [{ name: "n", valueInteger: 4 }] };
+  const prepare = t.mock.method(DatabaseSync.prototype, "prepare");
+  const result = engine.runPreparedBatch([{ subject, parameters }], { context: [view], limit: 0 })[0]!;
+  assert.equal(prepare.mock.calls.filter((call) => call.arguments[0] === extractSql(view)).length, 1);
+  assert.deepEqual(result.descriptors.map(({ name, table, column, type, primitive }) => [name, table, column, type, primitive]), [
+    ["alias", "patient", "id", "INTEGER", "integer64"], ["expr", null, null, null, "integer64"], ["unknown", null, null, null, undefined],
+  ]);
+  assert.deepEqual(engine.run(subject, { parameters, context: [view], limit: 1 }).rows, [{ alias: "1", expr: "5", unknown: 1 }]);
+  const outputOnly = sqlLibrary("output-only", "SELECT :n AS n", []);
+  outputOnly.parameter = [{ use: "out", name: "n", type: "integer" }];
+  assert.throws(() => engine.run(outputOnly), /not declared/);
+  assert.throws(() => engine.run(outputOnly, { parameters }), /Undeclared query parameter/);
+  const implicit = sqlLibrary("declared", "SELECT :n AS original", [], "sql-view");
+  implicit.version = "1";
+  assert.throws(() => engine.describe(subject, { context: [implicit] }), /dependency placeholders/);
+});
+
+test("an outer projection cannot hide duplicate logical names or an unsupported cardinality", (t) => {
+  const { engine } = fixture(t);
+  const duplicate = sqlLibrary("duplicate", "SELECT id AS key, name AS KEY FROM patient", [], "sql-view");
+  const cardinality = sqlLibrary("cardinality", "SELECT id AS key FROM patient", [], "sql-view");
+  cardinality.parameter = [{ name: "key", use: "out", type: "integer64", max: "2" }];
+  for (const [view, reason] of [[duplicate, /Duplicate output column names/], [cardinality, /Unsupported output cardinality: key/]] as const) {
+    const subject = sqlLibrary("consumer", "SELECT key FROM src", [{ label: "src", resource: view.url! }]);
+    assert.throws(() => engine.describe(view), reason);
+    assert.throws(() => engine.describe(subject, { context: [view] }), reason);
+  }
 });
 
 test("a batch holds a single SQLite snapshot when another connection changes the source between subjects", (t) => {
@@ -139,6 +179,24 @@ test("completed exports survive reopen and interrupted exports become explicit f
   } finally { reopened.close(); }
 });
 
+test("reopening a legacy completed job neither rewrites its manifest nor invents a model snapshot", (t) => {
+  const { engine, directory } = fixture(t);
+  const path = join(directory, "legacy.sqlite");
+  const db = new DatabaseSync(path);
+  const job = { state: "complete", result: { resourceType: "Parameters", parameter: [{ name: "output", part: [
+    { name: "name", valueString: "old" }, { name: "location", valueUri: "urn:example:old" },
+  ] }] }, files: { "old.json": { contentType: "application/json", body: '[{"n":7}]' } } };
+  try {
+    db.exec("CREATE TABLE export_jobs (id TEXT PRIMARY KEY, json TEXT NOT NULL)");
+    db.prepare("INSERT INTO export_jobs VALUES (?, ?)").run("old", JSON.stringify(job));
+  } finally { db.close(); }
+  const jobs = new ExportJobs(path, engine);
+  try {
+    assert.deepEqual(jobs.get("old"), job);
+    assert.deepEqual(jobs.snapshots(), []);
+  } finally { jobs.close(); }
+});
+
 test("artifact persistence and SQL attachment consistency survive round trips", (t) => {
   const { store, artifacts } = fixture(t);
   const query = sqlLibrary("persisted", "SELECT 1 AS one", []);
@@ -181,4 +239,65 @@ test("SQL execution retains legacy default attachments but rejects libraries con
   assert.throws(() => engine.run(query), {
     status: 422, code: "not-supported", message: /SQLite or default SQL content/,
   });
+});
+
+test("conformance checks ordered descriptors, exact primitive cells, collections and CSV record boundaries", (t) => {
+  const { engine } = fixture(t);
+  const query = sqlLibrary("verified", "SELECT 0 AS i, 0 AS flag, x'00ff' AS bytes, 7 AS wide, NULL AS optional, 'four' AS label, 1 AS unknown", []);
+  query.parameter = Object.entries({ i: "integer", flag: "boolean", bytes: "base64Binary", wide: "integer64", optional: "string", label: "string" })
+    .reverse().map(([name, type]) => ({ name, type, use: "out", min: name === "optional" ? 0 : 1, max: name === "label" ? "*" : "1" }));
+  const result = engine.runPreparedBatch([{ subject: query }])[0]!;
+  const model = result.contract.model;
+  const { columns, rows } = engine.run(query);
+  assert.deepEqual(rows, [{ i: 0, flag: false, bytes: "AP8=", wide: "7", optional: null, label: ["four"], unknown: 1 }]);
+  assert.deepEqual(checkRows(model, rows, columns).map((i) => i.severity), ["information"]);
+  const row = rows[0]!;
+  assert.deepEqual(checkRows(model, [Object.fromEntries(Object.entries(row).reverse())], columns), checkRows(model, rows, columns));
+  const missing = Object.fromEntries(Object.entries(row).slice(1));
+  for (const bad of [missing, Object.assign(Object.create(row), missing), { ...row, extra: "" },
+    { ...row, i: "0" }, { ...row, i: 2147483648 }, { ...row, flag: 0 }, { ...row, bytes: "!" }, { ...row, wide: 7 },
+    { ...row, wide: "9223372036854775808" }, { ...row, label: "four" }, { ...row, label: [""] }, { ...row, label: [null] }, { ...row, flag: null }]) {
+    assert.ok(checkRows(model, [bad]).some((i) => i.severity === "error"), JSON.stringify(bad));
+  }
+  assert.ok(checkRows(model, [], columns.slice(1)).some((i) => i.severity === "error"));
+  assert.ok(checkRows(model, rows, columns.toReversed()).some((i) => i.severity === "error"));
+  const empty = engine.runPreparedBatch([{ subject: query }], { limit: 0 })[0]!;
+  for (const format of ["json", "ndjson", "csv"] as const) {
+    const wire = formatResult(result, format, true);
+    assert.deepEqual(checkWire(model, result, wire, format, true).map((i) => i.severity), ["information"]);
+    assert.ok(checkWire(model, result, wire.replace("four", "five"), format, true).some((i) => i.severity === "error"));
+    for (const header of [true, false]) {
+      const body = format === "json" ? "[]" : format === "csv" && header ? columns.join(",") + "\r\n" : "";
+      assert.equal(formatResult(empty, format, header), body);
+      assert.deepEqual(checkWire(model, empty, body, format, header).map((i) => i.severity), ["information"]);
+    }
+    const reversed = { ...empty, descriptors: empty.descriptors.toReversed() };
+    assert.ok(checkWire(model, reversed, format === "json" ? "[]" : "", format, false).some((i) => i.severity === "error"));
+  }
+  const exact = sqlLibrary("exact", "SELECT 9223372036854775807 AS amount", []);
+  exact.parameter = [{ name: "amount", use: "out", type: "decimal" }];
+  const decimal = engine.runPreparedBatch([{ subject: exact }])[0]!;
+  assert.throws(() => formatResult(decimal, "json", false), /lossless finite JSON/);
+  assert.deepEqual(checkWire(decimal.contract.model, decimal, "9223372036854775807\r\n", "csv", false), []);
+});
+
+test("wire checks distinguish physical member and record order even for escaped and numeric aliases", (t) => {
+  const { engine } = fixture(t);
+  const query = sqlLibrary("order", `SELECT 'A' AS "la""bel", 'B' AS "2025" UNION ALL SELECT 'C,"D"' || char(10) || 'E', 'F'`, []);
+  const result = engine.runPreparedBatch([{ subject: query }])[0]!;
+  const publicResult = engine.run(query);
+  const first = String.raw`{"la\"bel":"A","2025":"B"}`, second = String.raw`{"la\"bel":"C,\"D\"\nE","2025":"F"}`;
+  const reversedFirst = String.raw`{"2025":"B","la\"bel":"A"}`, reversedSecond = String.raw`{"2025":"F","la\"bel":"C,\"D\"\nE"}`;
+  const header = '"la""bel",2025\r\n', csv = 'A,B\r\n"C,""D""\nE",F\r\n';
+  for (const [format, withHeader, valid, corrupt] of [
+    ["json", true, `[${first},${second}]`, [`[${reversedFirst},${second}]`, `[${second},${first}]`, `[${first}]`]],
+    ["ndjson", true, `${first}\n${second}\n`, [`${reversedFirst}\n${second}\n`, `${first}\n${reversedSecond}\n`]],
+    ["csv", true, header + csv, ['2025,"la""bel"\r\n' + csv]],
+    ["csv", false, csv, [csv.replace("A,B", "B,A")]],
+  ] as const) {
+    for (const input of [result, publicResult]) assert.equal(formatResult(input, format, withHeader), valid);
+    const errors = (body: string) => checkWire(result.contract.model, result, body, format, withHeader).filter((i) => i.severity === "error");
+    assert.deepEqual(errors(valid), []);
+    for (const body of corrupt) assert.ok(errors(body).length, body);
+  }
 });

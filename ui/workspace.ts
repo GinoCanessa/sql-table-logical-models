@@ -56,6 +56,11 @@ export function subjectPart(kind: string, value: string | Artifact | FhirObject)
   return { name: "subjectResource", resource: value as FhirObject };
 }
 
+export function buildDescribe(subject: FhirObject, context: Json[], profile: boolean): FhirObject {
+  return { resourceType: "Parameters", parameter: [subject, ...context.map((resource) => ({ name: "context", resource })),
+    ...(profile ? [{ name: "_format", valueCode: "operation" }] : [])] };
+}
+
 export function buildOperation(form: OperationForm): FhirObject {
   if (form.parameters.resourceType !== "Parameters" ||
     (form.parameters.parameter !== undefined && !Array.isArray(form.parameters.parameter))) throw new Error("Input values must be a FHIR Parameters resource");

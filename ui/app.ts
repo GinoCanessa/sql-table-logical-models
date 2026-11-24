@@ -1,6 +1,6 @@
 import type { Artifact, FhirObject } from "../src/fhir.js";
 import type { PlaygroundArtifact, PlaygroundCatalog, PlaygroundRelation, TablePreview } from "../src/playground.js";
-import { buildOperation, canonical, dependencyLabel, parseArray, parseObject, subjectPart } from "./workspace.js";
+import { buildDescribe, buildOperation, canonical, dependencyLabel, parseArray, parseObject, subjectPart } from "./workspace.js";
 import type { Dependency } from "./workspace.js";
 
 type Fetcher = (path: string, init?: RequestInit) => Promise<Response>;
@@ -422,7 +422,6 @@ export async function initializePlayground(doc: Document = document, fetcher: Fe
   }
 
   async function buildRequest() {
-    const mode = select("operation-subject-kind").value;
     const envelope = input("operation-envelope").checked;
     const fields = {
       operation: select("operation-kind").value === "sql-export" ? "sql-export" as const : "sql-run" as const,
@@ -432,6 +431,14 @@ export async function initializePlayground(doc: Document = document, fetcher: Fe
       context: parseArray(editor("operation-context").value, "Supporting context"),
       exportName: input("operation-export-name").value, trackingId: input("operation-tracking").value,
     };
+    const body = buildOperation({ ...fields, subject: await selectedSubject() });
+    editor("operation-request").value = pretty(body);
+    updateHttpPreview(fields.operation, envelope);
+    return body;
+  }
+
+  async function selectedSubject() {
+    const mode = select("operation-subject-kind").value;
     let subject: FhirObject;
     if (mode === "workspace") subject = subjectPart("inline", await makeLibrary());
     else if (mode === "reference") {
@@ -442,10 +449,18 @@ export async function initializePlayground(doc: Document = document, fetcher: Fe
       if (!input("operation-canonical").value.trim()) throw new Error("Enter a subject canonical URL");
       subject = subjectPart("canonical", input("operation-canonical").value);
     } else subject = subjectPart("inline", parseObject(editor("operation-inline").value, "Inline subject"));
-    const body = buildOperation({ ...fields, subject });
+    return subject;
+  }
+
+  async function inspectContract(profile: boolean) {
+    const context = parseArray(editor("operation-context").value, "Supporting context");
+    const body = buildDescribe(await selectedSubject(), context, profile);
     editor("operation-request").value = pretty(body);
-    updateHttpPreview(fields.operation, envelope);
-    return body;
+    updateHttpPreview("sql-describe", false);
+    const result = await operationRequest("/$sql-describe", post(body));
+    renderResponse(result.data, result.raw);
+    el("operation-response-status").textContent = `HTTP ${result.response.status}: ${profile ? "Operation profile" : "Result model"}`;
+    status("Contract described. Nothing executed or saved.");
   }
 
   function updateHttpPreview(operation = select("operation-kind").value, envelope = input("operation-envelope").checked) {
@@ -653,6 +668,8 @@ export async function initializePlayground(doc: Document = document, fetcher: Fe
   for (const id of ["operation-kind", "operation-subject-kind", "operation-envelope"]) on(id, "change", () => { operationFields(); updateHttpPreview(); });
   on("build-operation", "click", async () => { await buildRequest(); status("FHIR Parameters request built. Send it when ready."); });
   on("send-operation", "click", sendOperation);
+  on("describe-result", "click", () => inspectContract(false));
+  on("operation-profile", "click", () => inspectContract(true));
   on("check-export", "click", checkExport);
   on("delete-export", "click", async () => {
     if (!jobUrl) throw new Error("No export is selected");

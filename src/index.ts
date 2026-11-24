@@ -1,8 +1,12 @@
 export * from "./fhir.js";
 export * from "./schema.js";
 export * from "./models.js";
+export * from "./relation.js";
 export * from "./store.js";
 export * from "./engine.js";
 export * from "./operations.js";
+export * from "./describe.js";
+export * from "./conformance.js";
+export * from "./features.js";
 export { createApp } from "./server.js";
 export type { ServerOptions } from "./server.js";

@@ -1,10 +1,11 @@
-import { SOF, SQL_CONTENT_TYPE_EXTENSION, array, fail, isSqlContentType, object, sqlLibrary, text } from "./fhir.js";
+import { OperationError, SOF, SQL_CONTENT_TYPE_EXTENSION, array, fail, isSqlContentType, object, sqlLibrary, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
 import { extractSqlText, libraryKind, singleStatement } from "./engine.js";
 import type { QueryEngine, QueryResult } from "./engine.js";
 import { artifact } from "./store.js";
 import { quoteIdentifier } from "./schema.js";
 import type { SqlRelation, SqlSchema } from "./schema.js";
+import { primitives } from "./relation.js";
 
 export interface PlaygroundArtifact {
   reference: string;
@@ -38,7 +39,12 @@ export interface TablePreview extends QueryResult {
 
 function isDependency(resource: Artifact, engine: QueryEngine): boolean {
   if (resource.resourceType === "ViewDefinition") return true;
-  if (resource.resourceType === "StructureDefinition") return engine.bindings.some((b) => b.model === resource);
+  if (resource.resourceType === "StructureDefinition") {
+    if (engine.bindings.some((b) => b.model.url === resource.url && b.model.version === resource.version && b.model.id === resource.id)) return true;
+    if (!engine.catalog.configured?.has(resource)) return false;
+    try { return engine.catalog.resolve(`${resource.url}|${resource.version}`).id === resource.id; }
+    catch (error) { if (error instanceof OperationError) return false; throw error; }
+  }
   if (resource.resourceType !== "Library") return false;
   // Invalid stored artifacts remain inspectable, but are not offered as dependency candidates.
   const type = resource.type;
@@ -144,14 +150,15 @@ export function generateLibrary(value: unknown, baseUrl: string): Artifact {
   else if (input.version !== undefined) resource.version = text(input.version, "version");
   const names = new Set<string>();
   const types = ["string", "integer", "integer64", "decimal", "boolean", "date", "dateTime"];
-  resource.parameter = array(input.parameters, "parameters").map((value) => {
+  resource.parameter = array(input.parameters === undefined ? source?.parameter : input.parameters, "parameters").map((value) => {
     const parameter = object(value, "parameter");
     const name = text(parameter.name, "parameter.name");
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || names.has(name)) fail(400, "invalid", `Invalid or duplicate query parameter: ${name}`);
-    names.add(name);
-    if (!types.includes(String(parameter.type)) || parameter.use !== "in" ||
+    const key = `${parameter.use}:${name}`;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || names.has(key)) fail(400, "invalid", `Invalid or duplicate query parameter: ${name}`);
+    names.add(key);
+    if (!(parameter.use === "in" ? types.includes(String(parameter.type)) : parameter.use === "out" && primitives.has(String(parameter.type))) ||
       (parameter.min !== undefined && parameter.min !== 0 && parameter.min !== 1) ||
-      (parameter.max !== undefined && parameter.max !== "1")) fail(400, "not-supported", "Parameters must declare supported scalar input types (min 0/1, max 1)");
+      (parameter.max !== undefined && parameter.max !== "1" && !(parameter.use === "out" && parameter.max === "*"))) fail(400, "not-supported", "Unsupported Library parameter type, use or cardinality");
     return parameter;
   });
   return artifact(resource);
