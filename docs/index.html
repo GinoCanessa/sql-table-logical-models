@@ -165,7 +165,7 @@ const { bundle, bindings } = createLogicalModels(schema, {
           <p>R5-shaped logical models provide machine-readable structure without claiming that arbitrary SQL rows satisfy FHIR primitive value constraints.</p>
         </div>
         <article class="card prose">
-          <p>Each model has <code>kind = logical</code>, <code>derivation = specialization</code>, <code>type = url</code>, explicit <code>draft</code>/<code>experimental</code> status, and a <code>baseDefinition</code> pointing to the bundled local Relation base. Its differential contains a root plus scalar leaf elements. No snapshot or publisher is required for this prototype. IDs, paths and cardinalities are explicit rather than relying on proposal-specific defaults.</p>
+          <p>Each model has <code>kind = logical</code>, <code>derivation = specialization</code>, <code>type = url</code> and draft/experimental status. Derive and serve default to <code>--relation-base local</code>; use <code>sof</code> for the draft SQL-on-FHIR Relation canonical. The differential contains a 0..* root plus ordered scalar leaves. Generation writes explicit IDs and cardinalities; the Relation reader also accepts id-less draft elements, omitted column cardinalities (0..1) and boolean primary-key membership without inventing key order.</p>
           <pre tabindex="0" role="region" aria-label="Logical model excerpt"><code>{
   "resourceType": "StructureDefinition",
   "id": "patient",
@@ -182,24 +182,19 @@ const { bundle, bindings } = createLogicalModels(schema, {
       { "id": "patient", "path": "patient", "min": 0, "max": "*" },
       {
         "id": "patient.id", "path": "patient.id", "min": 1, "max": "1",
-        "type": [{ "code": "integer64" }],
-        "extension": [
-          {
-            "url": "https://example.org/sql-table-logical-models/StructureDefinition/sql-type",
-            "valueString": "INTEGER"
-          }
-        ]
+        "type": [{ "code": "integer64" }], "mustHaveValue": true,
+        "mapping": [{ "identity": "sql", "language": "application/sql;dialect=sqlite", "map": "INTEGER" }]
       }
     ]
   }
 }</code></pre>
-          <p>This is an excerpt: actual output also includes status, the SQL name, affinity, primary-key position and DDL. Column order follows SQLite <code>cid</code>; composite primary-key order is recorded separately. A database view is another relation with <code>relation-kind = view</code>; its declared column metadata may be incomplete.</p>
+          <p>This excerpt omits status, the primary-key position and DDL. Column order follows SQLite <code>cid</code>; composite key order is recorded separately. A view has <code>relation-kind = view</code>; SQLite may not supply declared types for every view column.</p>
           <h3>Names are logical; SQL names are lossless</h3>
           <p>Already-safe logical names are retained. Other names receive a deterministic sanitised name with a SHA-256 suffix; resource IDs use a separate FHIR-id-safe encoding. This distinguishes names such as <code>a-b</code>, <code>a_b</code> and <code>a.b</code>. Original physical names survive in <code>sql-name</code>; SQL identifiers are always quoted. These identities are name-derived, so renaming a table changes its generated canonical.</p>
           <h3>Nullability is not simply “primary key means required”</h3>
           <p>All columns have <code>max = 1</code>. <code>min = 1</code> reflects declared NOT NULL or an actual SQLite non-null key guarantee: a rowid-alias INTEGER PRIMARY KEY, a WITHOUT ROWID primary key, or a STRICT primary key. An ordinary nullable TEXT/composite primary key remains <code>min = 0</code>. Inline <code>INTEGER PRIMARY KEY DESC</code> is not treated as a rowid alias. View nullability is only what SQLite reports. <a href="#source-sqlite">[6]</a></p>
           <h3>Metadata does not silently become validation</h3>
-          <p>Default expressions are retained as SQL text, not converted to <code>defaultValue[x]</code>. DDL retains CHECK clauses, collations, generated expressions, identity/autoincrement details and other dialect syntax not otherwise modelled. The implementation neither evaluates those constraints against existing rows nor transforms them into FHIR invariants. FHIR instance conversion and full StructureDefinition validation are outside this iteration.</p>
+          <p>Guaranteed non-NULL leaves also set <code>mustHaveValue=true</code>; nullable leaves omit it. Insert defaults stay unevaluated SQL, never <code>defaultValue[x]</code>. Row CHECKs preserve the predicate on a root constraint. Only simple NULL tests translate to FHIRPath; other predicates stay SQL rather than guessing SQLite comparison or NULL semantics. Ordered primary/unique keys and foreign keys concern multiple rows and are not invariants. Original DDL and index metadata preserve generated expressions, collation, order and partial predicates. This is not full StructureDefinition or row validation.</p>
         </article>
       </section>
 
@@ -212,7 +207,7 @@ const { bundle, bindings } = createLogicalModels(schema, {
         <article class="card prose">
           <div class="table-scroll" role="region" aria-label="SQLite type mapping table" tabindex="0">
             <table>
-              <caption>FHIR hints do not coerce query results</caption>
+              <caption>Schema-derived primitive hints (no sampling)</caption>
               <thead><tr><th scope="col">Declared name or affinity</th><th scope="col">FHIR hint</th><th scope="col">Qualification</th></tr></thead>
               <tbody>
                 <tr><td>BOOL, BOOLEAN</td><td>boolean</td><td>Exact well-known spellings; SQLite may still store non-boolean values.</td></tr>
@@ -222,13 +217,37 @@ const { bundle, bindings } = createLogicalModels(schema, {
                 <tr><td>TEXT affinity (CHAR, CLOB, TEXT)</td><td>string</td><td>No JSON, code or canonical semantics guessed from names.</td></tr>
                 <tr><td>Explicit BLOB</td><td>base64Binary</td><td>Affinity may still differ if an earlier rule matches the declared type.</td></tr>
                 <tr><td>No declared type</td><td>string + warning</td><td>SQLite affinity is BLOB. The hint is provisional, not a sampled type.</td></tr>
-                <tr><td>REAL (REAL, FLOA, DOUB); remaining NUMERIC</td><td>decimal</td><td>Declared DECIMAL precision/scale remain in sql-type; SQLite does not enforce fixed decimal precision.</td></tr>
+                <tr><td>REAL (REAL, FLOA, DOUB); remaining NUMERIC</td><td>decimal</td><td>Declared precision/scale stay in the selected SQL type encoding; SQLite does not enforce fixed decimal precision.</td></tr>
               </tbody>
             </table>
           </div>
           <p>Affinity precedence matters: <code>FLOATING POINT</code> contains <code>INT</code> and therefore has INTEGER affinity. The mapped FHIR type is an authoring aid, not a replacement for the declared type grammar. The design starts from the FHIRPath Lab mapping but intentionally uses <code>integer64</code> and keeps foreign-key values primitive. <a href="#source-lab">[5]</a></p>
+          <p><code>--integer-type integer64|integer|auto</code> applies to derive and serve. The default is integer64. Explicit integer asserts a 32-bit range; auto recognizes a whole CHECK of the form <code>x BETWEEN low AND high</code> with integer literals within that range. SMALLINT or INT alone proves no bound. String columns declared CHAR, VARCHAR, NCHAR, NVARCHAR, CHARACTER, CHARACTER VARYING or VARYING CHARACTER with a representable length carry <code>maxLength</code>. SQLite does not enforce declared lengths; over-length strings are not truncated.</p>
+          <h3 id="type-encodings">Migrating visit.cost: before, A, B and both</h3>
+          <p>These abbreviated column excerpts use <code>EXT/</code> for <code>https://example.org/sql-table-logical-models/StructureDefinition/</code>. In each case the leaf is <code>visit.cost</code>, 0..1. <code>--type-encoding</code> works with both derive and serve.</p>
+          <pre tabindex="0" aria-label="Retired column encoding"><code>Old (no longer emitted)
+{ "type":[{"code":"decimal"}],
+  "extension":[{"url":"EXT/sql-name","valueString":"cost"},
+               {"url":"EXT/sql-type","valueString":"DECIMAL(10,2)"},
+               {"url":"EXT/sqlite-affinity","valueCode":"NUMERIC"}],
+  "mapping":[{"identity":"sql","map":"DECIMAL(10,2)"}] }</code></pre>
+          <pre tabindex="0" aria-label="Three new column encodings"><code>A: mapping (default)
+{ "type":[{"code":"decimal"}],
+  "mapping":[{"identity":"sql","language":"application/sql;dialect=sqlite","map":"DECIMAL(10,2)"}] }
+
+B: extension
+{ "type":[{"code":"decimal","extension":[{"url":"EXT/sql-type","extension":[
+    {"url":"dialect","valueCoding":{"system":"https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes","code":"application/sql;dialect=sqlite"}},
+    {"url":"type","valueString":"DECIMAL(10,2)"}]}]}] }
+
+both: A's mapping and B's primitive type entry on the same leaf
+{ "mapping":[{"identity":"sql","language":"application/sql;dialect=sqlite","map":"DECIMAL(10,2)"}],
+  "type":[{"code":"decimal","extension":[{"url":"EXT/sql-type","extension":[
+    {"url":"dialect","valueCoding":{"system":"https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes","code":"application/sql;dialect=sqlite"}},
+    {"url":"type","valueString":"DECIMAL(10,2)"}]}]}] }</code></pre>
+          <p>On input, an omitted mapping language inherits the concrete model's <code>sql-content-type</code>. No declared type means a warning, not an empty SQL annotation. None of the modes emits the old string extension, computed affinity or a root SQL mapping for the table name.</p>
           <h3>Wire values stay faithful to SQLite</h3>
-          <p>Safe integers become JSON numbers; integers outside JavaScript's safe range become exact decimal strings. BLOBs become base64 strings; SQL NULL stays JSON null; boolean storage values remain SQLite integers. JSON is an array, NDJSON is one row per line, and CSV has quoted fields and CRLF endings. CSV represents NULL as an empty field and cannot distinguish it from an empty string. Decimal precision already lost by SQLite floating-point storage cannot be recovered here.</p>
+          <p>Run and export now serialize modeled integer64 as an exact decimal string at every magnitude (<code>"1"</code>, <code>"9223372036854775807"</code>), not sometimes a JSON number. Modeled integer and decimal remain finite JSON numbers, including integral decimal <code>40</code>. An incompatible numeric value fails instead of silently overflowing. Direct columns and aliases use their prepared origin; a Library can type an expression with a matching named <code>parameter[use=out]</code>. Unresolved expressions keep storage-value conversion: a safe integer becomes a number, a larger one a string. BLOBs remain base64 and NULL remains null. JSON is an array; NDJSON is one row per line. CSV uses raw cells, optional headers, quoting and CRLF; NULL and the empty string are indistinguishable there.</p>
         </article>
       </section>
 
@@ -284,6 +303,7 @@ ORDER BY v.id</code></pre>
           <h3>Resolution and query parameters</h3>
           <p>Canonical references may include <code>|version</code>. A matching inline <code>context</code> dependency outranks the stored artifact. Ambiguous unversioned references fail rather than choosing an arbitrary version. Context entries must have unique URLs and all must be used somewhere in the invocation's dependency graph. A missing canonical returns a 404 OperationOutcome. Generated models cannot be edited or deleted via HTTP.</p>
           <p>Input values are nested FHIR Parameters matched by declared Library parameter name and <code>value[x]</code> field. Supported declarations are scalar input <code>string</code>, <code>integer</code>, <code>integer64</code>, <code>decimal</code>, <code>boolean</code>, <code>date</code> and <code>dateTime</code>. Only <code>:name</code> SQL placeholders are accepted; undeclared placeholders and undeclared/repeated supplied values fail. Required inputs have <code>min = 1</code>; omitted optional inputs bind as SQL NULL. Parameterised SQLView dependencies are not supported. Date strings are passed through to SQLite; callers remain responsible for their FHIR lexical form.</p>
+          <p>Output declarations are not placeholders and need no input values. A SQLView with only output declarations can still be a dependency.</p>
         </article>
       </section>
 
@@ -326,7 +346,7 @@ ORDER BY v.id</code></pre>
   -H 'Prefer: respond-async' `
   --data-binary '@examples\export.json'</code></pre>
           <p>The input contains repeating <code>subject</code> parts, each with a naming form, optional <code>name</code> and optional nested query <code>parameters</code>. Format, header and context apply to the whole job. A subject name defaults to its artifact name, or a generated ID; names must be unique and filename-safe, otherwise supply an explicit one. Export output defaults to NDJSON independently of Accept and never accepts <code>_limit</code>.</p>
-          <p>Kick-off returns 202 and Content-Location. Status returns 202 while queued and 303 when finished; the result URL returns a Parameters manifest or an OperationOutcome. The manifest includes exportId, status, format, timing, echoed clientTrackingId if supplied, and one output entry per subject. All subjects execute in one read transaction. Jobs and output bytes persist in the artifact store without automatic expiration. Interrupted jobs become failed after a restart. Cancellation cannot preempt synchronous SQL already running on the event loop.</p>
+          <p>The unified system-level SQLRun and SQLExport definitions describe different outputs. Run declares one Binary return whose <code>binary-content-model</code> points to the local abstract Relation. Export returns an empty 202 with <code>Content-Location</code> and <code>Retry-After</code>. Poll that URL: 202 means pending; 303 Location identifies the final result. Success returns Parameters with exportId, status, top-level <code>location</code> (the polling URI), _format, start/end times, clientTrackingId if supplied, and one output per subject with its name and download <code>location</code>. Neither URI is a Binary. All subjects execute in one read transaction. Jobs and bytes persist until deletion. Interrupted jobs fail after restart; cancellation cannot preempt synchronous SQL.</p>
           <p><strong>Error contract:</strong> malformed inputs or unsupported features return 400 (or 415 for content type), missing artifacts 404, ambiguous/conflicting canonicals 409, query/shape/row-budget failures 422 and incompatible Accept 406. Errors carry an OperationOutcome. Unexpected failures are logged and return 500. Request bodies are limited to 1 MiB.</p>
         </article>
       </section>
@@ -379,11 +399,13 @@ ORDER BY v.id</code></pre>
               <thead><tr><th scope="col">Name / placement</th><th scope="col">Value</th><th scope="col">Meaning</th></tr></thead>
               <tbody>
                 <tr><td>sql-content-type / SQL Library, concrete model or demo ViewDefinition</td><td>valueCoding</td><td>SQL dialect/content type: system https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes, code application/sql;dialect=sqlite. A local extension, not an upstream SQL-on-FHIR Extension profile.</td></tr>
-                <tr><td>sql-name / model or column</td><td>valueString</td><td>Unmodified physical SQL identifier.</td></tr>
+                <tr><td>sql-name / model or column</td><td>valueString</td><td>Physical SQL identifier, only when different from the logical name.</td></tr>
                 <tr><td>relation-kind / model</td><td>valueCode</td><td>table or view.</td></tr>
                 <tr><td>sql-ddl / model</td><td>valueString</td><td>Original CREATE text from sqlite_schema.</td></tr>
-                <tr><td>sqlite-strict; sqlite-without-rowid / model</td><td>valueBoolean</td><td>Dialect table flags.</td></tr>
-                <tr><td>sql-type; sqlite-affinity / column</td><td>valueString; valueCode</td><td>Declared type grammar and computed affinity. The sql mapping also carries declared type text.</td></tr>
+                <tr><td>sqlite-strict; sqlite-without-rowid / model</td><td>valueBoolean</td><td>Present only when true.</td></tr>
+                <tr><td>sql-type / primitive type entry</td><td>Nested dialect (valueCoding) and type (valueString)</td><td>Exact dialect-specific declared type; only in extension or both mode.</td></tr>
+                <tr><td>sql-expression / root constraint</td><td>valueString</td><td>Original SQL CHECK predicate, also in constraint.human.</td></tr>
+                <tr><td>unique-key / model</td><td>Repeated column (valueString)</td><td>Ordered logical column names for an unconditional non-PK unique index over named columns. Not a row constraint.</td></tr>
                 <tr><td>primary-key-position / column</td><td>valueInteger</td><td>One-based position in the composite primary key.</td></tr>
                 <tr><td>sql-default / column</td><td>valueString</td><td>Unevaluated SQL default expression.</td></tr>
                 <tr><td>generated / column</td><td>valueCode</td><td>virtual or stored; hidden virtual-table columns are omitted.</td></tr>
@@ -393,7 +415,7 @@ ORDER BY v.id</code></pre>
               </tbody>
             </table>
           </div>
-          <p>The index JSON is a pragmatic dialect payload, not a portable FHIR constraint vocabulary. There is intentionally no <code>relation-source</code> attachment loader yet. Configuration-based binding follows the proposal's separation between canonical schema identity and environment-specific data. <a href="#source-gist">[2]</a></p>
+          <p>The index JSON is a dialect payload, not a portable invariant. An uploaded <code>relation-source</code> is retained verbatim, never fetched or bound. Ordinary writes return the saved resource and Location, with <code>X-Relation-Issue-Count</code> when advisories exist. Send <code>Prefer: return=OperationOutcome</code> for the issue list instead. Only discovered source models have physical bindings. <a href="#source-gist">[2]</a></p>
         </article>
       </section>
 

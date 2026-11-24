@@ -56,6 +56,8 @@ export const SOF = "http://hl7.org/fhir/uv/sql-on-fhir";
 export const EXP = "https://example.org/sql-table-logical-models";
 export const EXT = `${EXP}/StructureDefinition`;
 export const RELATION = `${EXT}/Relation`;
+export const SOF_RELATION = `${SOF}/StructureDefinition/Relation`;
+export const BINARY_CONTENT_MODEL = "http://hl7.org/fhir/StructureDefinition/binary-content-model";
 export const SQL_TEXT = `${SOF}/StructureDefinition/sql-text`;
 export const SQL_CONTENT_TYPE_SYSTEM = "https://sql-on-fhir.org/ig/CodeSystem/SQLContentTypeCodes";
 export const SQLITE_CONTENT_TYPE = "application/sql;dialect=sqlite";

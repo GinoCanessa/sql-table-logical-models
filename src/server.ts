@@ -3,7 +3,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { EXP, OperationError, SOF, fail, object } from "./fhir.js";
+import { BINARY_CONTENT_MODEL, EXP, OperationError, RELATION, SOF, fail, object } from "./fhir.js";
 import type { FhirObject } from "./fhir.js";
 import { QueryEngine } from "./engine.js";
 import { ExportJobs } from "./exports.js";
@@ -52,6 +52,9 @@ function capability(): FhirObject {
 function operationDefinition(isExport: boolean): FhirObject {
   const code = isExport ? "sql-export" : "sql-run";
   const parameter = (name: string, type: string, min = 0, max = "1") => ({ name, use: "in", type, min, max });
+  const out = (name: string, type: string, min = 0, max = "1") => ({ name, use: "out", type, min, max });
+  const subject = [parameter("subjectCanonical", "canonical"), parameter("subjectReference", "Reference"),
+    parameter("subjectResource", "CanonicalResource"), parameter("parameters", "Parameters")];
   return {
     resourceType: "OperationDefinition", id: code, url: `${EXP}/OperationDefinition/${code}`,
     name: isExport ? "ExperimentalSQLExport" : "ExperimentalSQLRun",
@@ -60,18 +63,18 @@ function operationDefinition(isExport: boolean): FhirObject {
     description: "Partial local implementation; external logical-model relations and ViewDefinition source extension are experimental. See docs for limits and unsupported features.",
     parameter: [
       ...(isExport ? [{
-        name: "subject", use: "in", min: 1, max: "*", part: [
-          parameter("name", "string"), parameter("subjectCanonical", "canonical"),
-          parameter("subjectReference", "Reference"), parameter("subjectResource", "CanonicalResource"),
-          parameter("parameters", "Parameters"),
-        ],
-      }] : [
-        parameter("subjectCanonical", "canonical"), parameter("subjectReference", "Reference"),
-        parameter("subjectResource", "CanonicalResource"), parameter("parameters", "Parameters"),
-        parameter("_limit", "integer"),
-      ]),
+        name: "subject", use: "in", min: 1, max: "*", part: [parameter("name", "string"), ...subject],
+      }] : [...subject, parameter("_limit", "integer")]),
       parameter("context", "CanonicalResource", 0, "*"), parameter("_format", "code"), parameter("header", "boolean"),
-      ...(isExport ? [parameter("clientTrackingId", "string")] : []),
+      ...(isExport ? [
+        parameter("clientTrackingId", "string"),
+        out("exportId", "string", 1), out("status", "code", 1), out("location", "uri", 1),
+        out("clientTrackingId", "string"), out("_format", "code"), out("exportStartTime", "instant"), out("exportEndTime", "instant"),
+        { name: "output", use: "out", min: 0, max: "*", part: [out("name", "string", 1), out("location", "uri", 1, "*")] },
+      ] : [{
+        ...out("return", "Binary", 1), documentation: "Native JSON, NDJSON or CSV, or a negotiated FHIR Binary envelope.",
+        extension: [{ url: BINARY_CONTENT_MODEL, valueCanonical: RELATION }],
+      }]),
     ],
   };
 }
@@ -245,9 +248,17 @@ export function createApp(options: ServerOptions): { server: Server; close: () =
         if (input.resourceType !== type || (id && input.id !== undefined && input.id !== id)) fail(400, "invalid", "Artifact type/id must match the request URL");
         const actualId = id ?? assignedId();
         const existed = catalog.list(type).some((r) => r.id === actualId);
-        const resource = catalog.put({ ...input, id: actualId });
+        const issues: FhirObject[] = [];
+        const resource = catalog.put({ ...input, id: actualId }, issues);
         res.setHeader("Location", `/${type}/${resource.id}`);
-        send(res, existed ? 200 : 201, resource);
+        if (issues.length) res.setHeader("X-Relation-Issue-Count", issues.length);
+        const prefer = String(req.headers.prefer ?? "").toLowerCase().split(",").map((p) => p.trim());
+        if (prefer.includes("return=operationoutcome")) {
+          res.setHeader("Preference-Applied", "return=OperationOutcome");
+          send(res, existed ? 200 : 201, { resourceType: "OperationOutcome", issue: issues.length ? issues : [
+            { severity: "information", code: "success", diagnostics: "Artifact saved." },
+          ] });
+        } else send(res, existed ? 200 : 201, resource);
         return;
       }
       if (method === "DELETE" && id) {

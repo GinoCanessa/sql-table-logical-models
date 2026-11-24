@@ -17,7 +17,7 @@ test("canonical relations, ViewDefinition and nested SQLViews compose with bound
   const result = engine.run(catalog.get("Library/patient-visits"), {
     parameters: { resourceType: "Parameters", parameter: [{ name: "minimum_cost", valueDecimal: 25 }] },
   });
-  assert.deepEqual(result.rows, [{ patient_id: 1, patient_name: "Example One", visit_id: 10, occurred_on: "2026-01-10", cost: 40.5 }]);
+  assert.deepEqual(result.rows, [{ patient_id: "1", patient_name: "Example One", visit_id: "10", occurred_on: "2026-01-10", cost: 40.5 }]);
   assert.equal(engine.run(catalog.get("Library/patient-visits")).rows.length, 2);
   const model = engine.bindings.find((b) => b.table === "visit_totals")!.model;
   assert.deepEqual(engine.run(sqlLibrary("totals", "SELECT visit_count FROM totals ORDER BY patient_id", [{ label: "totals", resource: model.url! }])).rows, [
@@ -78,12 +78,32 @@ test("row caps, zero limits, empty result columns, BLOBs and large integers reta
   const { engine } = fixture(t, 2);
   const query = sqlLibrary("rows", "SELECT id FROM visit ORDER BY id", []);
   assert.throws(() => engine.run(query), /exceeds 2 rows/);
-  assert.deepEqual(engine.run(query, { limit: 1 }).rows, [{ id: 10 }]);
+  assert.deepEqual(engine.run(query, { limit: 1 }).rows, [{ id: "10" }]);
   assert.deepEqual(engine.run(query, { limit: 0 }), { columns: ["id"], rows: [] });
   assert.throws(() => engine.run(query, { limit: 3 }), errorCode(400));
   assert.deepEqual(engine.run(sqlLibrary("empty", "SELECT name FROM patient WHERE 0", [])), { columns: ["name"], rows: [] });
   assert.deepEqual(engine.run(sqlLibrary("values", "SELECT 9223372036854775807 AS big, x'00ff' AS bytes, NULL AS missing", [])).rows,
     [{ big: "9223372036854775807", bytes: "AP8=", missing: null }]);
+});
+
+test("prepared origins survive aliases and output declarations are not input placeholders", (t) => {
+  const { engine } = fixture(t);
+  const view = sqlLibrary("declared", "SELECT id AS original FROM patient", [], "sql-view");
+  view.parameter = [{ use: "out", name: "original", type: "integer64" }];
+  const subject = sqlLibrary("mixed", "SELECT original AS alias, :n + 1 AS expr, 1 AS unknown FROM dep ORDER BY alias", [
+    { label: "dep", resource: view.url! },
+  ]);
+  subject.parameter = [{ use: "out", name: "expr", type: "integer64" }, { use: "in", name: "n", type: "integer" }];
+  const parameters = { resourceType: "Parameters", parameter: [{ name: "n", valueInteger: 4 }] };
+  const result = engine.runPreparedBatch([{ subject, parameters }], { context: [view], limit: 0 })[0]!;
+  assert.deepEqual(result.descriptors.map(({ name, table, column, type, primitive }) => [name, table, column, type, primitive]), [
+    ["alias", "patient", "id", "INTEGER", "integer64"], ["expr", null, null, null, "integer64"], ["unknown", null, null, null, undefined],
+  ]);
+  assert.deepEqual(engine.run(subject, { parameters, context: [view], limit: 1 }).rows, [{ alias: "1", expr: "5", unknown: 1 }]);
+  const outputOnly = sqlLibrary("output-only", "SELECT :n AS n", []);
+  outputOnly.parameter = [{ use: "out", name: "n", type: "integer" }];
+  assert.throws(() => engine.run(outputOnly), /not declared/);
+  assert.throws(() => engine.run(outputOnly, { parameters }), /Undeclared query parameter/);
 });
 
 test("a batch holds a single SQLite snapshot when another connection changes the source between subjects", (t) => {

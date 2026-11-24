@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { array, object } from "./fhir.js";
-import { createLogicalModels } from "./models.js";
+import { createLogicalModels, modelSettings } from "./models.js";
 import { readSqliteSchema } from "./schema.js";
 import { ArtifactStore } from "./store.js";
 import { createApp } from "./server.js";
@@ -16,6 +16,7 @@ async function main(): Promise<void> {
       database: { type: "string" }, artifacts: { type: "string", default: ".data/artifacts.sqlite" },
       base: { type: "string", default: "https://example.org/sql" },
       version: { type: "string" }, out: { type: "string" },
+      "type-encoding": { type: "string" }, "relation-base": { type: "string" }, "integer-type": { type: "string" },
       port: { type: "string", default: "3000" }, "max-rows": { type: "string", default: "1000" },
       help: { type: "boolean", short: "h" },
     },
@@ -24,6 +25,7 @@ async function main(): Promise<void> {
   if (values.help || !command) {
     console.log("Usage: node dist\\src\\cli.js <derive|serve|demo> --database <file> [--base <canonical>] [--version <version>]\n" +
       "derive: [--out <bundle.json>] (stdout if omitted)\n" +
+      "derive/serve: [--type-encoding mapping|extension|both] [--relation-base local|sof] [--integer-type integer64|integer|auto]\n" +
       "serve: [--artifacts .data\\artifacts.sqlite] [--port 3000] [--max-rows 1000]\n" +
       "demo: creates a synthetic database and artifacts; refuses to overwrite an existing database");
     return;
@@ -33,7 +35,13 @@ async function main(): Promise<void> {
   const database = resolve(values.database ?? ".data/demo.sqlite");
   const artifacts = resolve(values.artifacts);
   if (command !== "derive" && database.toLowerCase() === artifacts.toLowerCase()) throw new Error("Source database and artifact store must be different files");
-  const modelOptions = { baseUrl: values.base, ...(values.version ? { version: values.version } : {}) };
+  const flags = {
+    ...(values["type-encoding"] !== undefined ? { typeEncoding: values["type-encoding"] } : {}),
+    ...(values["relation-base"] !== undefined ? { relationBase: values["relation-base"] } : {}),
+    ...(values["integer-type"] !== undefined ? { integerType: values["integer-type"] } : {}),
+  };
+  if (command === "demo" && Object.keys(flags).length) throw new Error("Model generation options apply only to derive and serve");
+  const modelOptions = { ...modelSettings(flags), baseUrl: values.base, ...(values.version ? { version: values.version } : {}) };
   if (command === "derive") {
     if (values.out && resolve(values.out).toLowerCase() === database.toLowerCase()) throw new Error("--out cannot overwrite the source database");
     const output = JSON.stringify(createLogicalModels(readSqliteSchema(database), modelOptions).bundle, null, 2) + "\n";

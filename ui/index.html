@@ -115,6 +115,7 @@
               <div id="tracking-field" hidden><label for="operation-tracking">Client tracking ID (optional)</label><input id="operation-tracking"></div>
             </div>
             <div class="toolbar"><label class="check"><input id="operation-header" type="checkbox" checked> CSV header</label><label id="envelope-field" class="check"><input id="operation-envelope" type="checkbox"> FHIR Binary response envelope</label></div>
+            <p class="help">Run and export use the same row formats. In JSON and NDJSON, a modeled integer64 is always a string (even &quot;1&quot;); integer and decimal are numbers, and SQL NULL is null. CSV keeps raw cells, quotes and CRLF. In an export manifest, location is the polling URL; output.location downloads the file.</p>
             <details><summary>Parameters and supporting context</summary>
               <label for="operation-parameters">Input values (FHIR Parameters; Library subjects only)</label><textarea id="operation-parameters" class="code-editor" rows="6" spellcheck="false">{"resourceType":"Parameters","parameter":[]}</textarea>
               <label for="operation-context">Inline context (JSON array)</label><textarea id="operation-context" class="code-editor" rows="6" spellcheck="false">[]</textarea>

@@ -60,6 +60,20 @@ Derivation reads schema metadata, not records, and writes a FHIR Bundle containi
 
 The source database and generated models are read-only. Saved Libraries and ViewDefinitions live in the writable artifact store. Playground SQL and form inputs are not automatically retained across browser reloads; save or download artifacts to keep them.
 
+## Model and output migration
+
+`derive` and `serve` accept the same options. Use the same settings for both (`typeEncoding`, `relationBase`, `integerType` in the TypeScript API).
+
+| Option | Default | Alternatives |
+| --- | --- | --- |
+| `--type-encoding` | `mapping`: exact declared type in a dialect-qualified `sql` mapping | `extension`: complex `sql-type` on the primitive type entry; `both`: both new forms |
+| `--relation-base` | `local`: bundled experimental Relation | `sof`: draft SQL-on-FHIR Relation canonical |
+| `--integer-type` | `integer64`: signed 64-bit | `integer`: operator assertion of signed 32-bit values; `auto`: narrow only with a recognized range CHECK, never from a width name |
+
+Migrate readers away from the old column-level `sql-type.valueString`, `sqlite-affinity` and root table-name mapping. See the [before/after `visit.cost` encodings](docs/index.html#type-encodings). `readRelation()` reads either base without rewriting the artifact. Draft column IDs are optional, omitted column cardinalities mean `0..1`, and a boolean primary key records membership, not order. An uploaded `relation-source` is retained but never opened or bound.
+
+**JSON/NDJSON change:** Run and export now write every modeled `integer64` as a decimal string, including `"1"`. Modeled `integer` and `decimal` are numbers; `40` remains a number for an integral cost. SQL NULL remains `null`. An untyped expression still uses its SQLite storage value, not a guessed type. CSV retains its raw fields, optional headers, quoting and CRLF. The completed export manifest distinguishes its top-level polling `location` from each file's `output.location`.
+
 ## Development
 
 ```powershell
@@ -70,6 +84,8 @@ node .\dist\src\cli.js --help
 ```
 
 The npm `start`, `derive`, `demo` and `test` scripts build TypeScript before running. The reusable API is exported through `dist\src\index.js` after a build.
+
+`QueryEngine.run()` and `runBatch()` retain the `{columns, rows}` result shape. `runPreparedBatch()` exposes ordered statement descriptors and raw SQLite rows to formatters; unlike JSON results, these can contain `bigint` values.
 
 | Directory | Contents |
 | --- | --- |
@@ -85,7 +101,7 @@ The npm `start`, `derive`, `demo` and `test` scripts build TypeScript before run
 
 This is a **trusted local development tool**, with no authentication. SQL can read any source table. Execution is synchronous and buffered: row ceilings do not impose execution-time or memory limits. Do not expose the server to untrusted users.
 
-SQLite type mappings are schema-derived hints, not row validation or coercion. ViewDefinition support is limited; arbitrary FHIRPath, terminology, patient/group filtering and Parquet output are not implemented.
+SQLite type mappings are schema-derived hints, not full row validation. Numeric JSON output fails rather than silently rounding an incompatible value. SQLite does not enforce declared character lengths. ViewDefinition support is limited; arbitrary FHIRPath, terminology, patient/group filtering and Parquet output are not implemented.
 
 See the [HTML documentation source](docs/index.html), or serve it at `/docs/`, for modeling choices, supported operations and their restrictions.
 

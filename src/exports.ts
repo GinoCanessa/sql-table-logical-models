@@ -48,7 +48,7 @@ export class ExportJobs {
       if (!this.db.prepare("SELECT id FROM export_jobs WHERE id = ?").get(id)) return;
       try {
         const files: Job["files"] = Object.create(null);
-        const results = this.engine.runBatch(subjects.map(({ request }) => ({
+        const results = this.engine.runPreparedBatch(subjects.map(({ request }) => ({
           subject: request.subject, ...(request.parameters ? { parameters: request.parameters } : {}),
         })), { context: subjects[0]!.request.context });
         const outputs = subjects.map(({ name, request }, index) => {
@@ -69,6 +69,7 @@ export class ExportJobs {
             parameter: [
               { name: "exportId", valueString: id },
               { name: "status", valueCode: "completed" },
+              { name: "location", valueUri: `${base}/$sql-export/${id}/status` },
               { name: "_format", valueCode: subjects[0]!.request.format },
               { name: "exportStartTime", valueInstant: transactionTime },
               { name: "exportEndTime", valueInstant: new Date().toISOString() },

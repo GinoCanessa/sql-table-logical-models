@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { array, fail, object, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
-import { QueryEngine } from "./engine.js";
-import type { QueryResult } from "./engine.js";
+import { QueryEngine, jsonResult } from "./engine.js";
+import type { PreparedResult, QueryResult } from "./engine.js";
 import { artifact, parameters } from "./store.js";
 
 export const MEDIA = { json: "application/json", ndjson: "application/x-ndjson", csv: "text/csv" } as const;
@@ -97,20 +97,23 @@ export function parseRun(engine: QueryEngine, input: unknown, accept?: string): 
   };
 }
 
-export function formatResult(result: QueryResult, format: Format, header: boolean): string {
-  if (format === "json") return JSON.stringify(result.rows);
-  if (format === "ndjson") return result.rows.map((r) => JSON.stringify(r) + "\n").join("");
+export function formatResult(result: PreparedResult | QueryResult, format: Format, header: boolean): string {
+  if (format !== "csv") {
+    const { rows } = "descriptors" in result ? jsonResult(result) : result;
+    return format === "json" ? JSON.stringify(rows) : rows.map((r) => JSON.stringify(r) + "\n").join("");
+  }
+  const columns = "descriptors" in result ? result.descriptors.map((c) => c.name) : result.columns;
   const csv = (value: unknown) => {
-    const s = value === null || value === undefined ? "" : String(value);
+    const s = value instanceof Uint8Array ? Buffer.from(value).toString("base64") : value == null ? "" : String(value);
     return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
   };
-  const rows = result.rows.map((r) => result.columns.map((c) => csv(r[c])).join(","));
-  if (header) rows.unshift(result.columns.map(csv).join(","));
+  const rows = result.rows.map((r) => columns.map((c) => csv(r[c])).join(","));
+  if (header) rows.unshift(columns.map(csv).join(","));
   return rows.length ? rows.join("\r\n") + "\r\n" : "";
 }
 
 export function runOperation(engine: QueryEngine, request: RunRequest): { contentType: string; body: string } {
-  const result = engine.run(request.subject, request);
+  const result = engine.runPreparedBatch([request], request)[0]!;
   const body = formatResult(result, request.format, request.header);
   const contentType = MEDIA[request.format];
   return request.envelope ?

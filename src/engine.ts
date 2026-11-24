@@ -1,15 +1,25 @@
 import { constants, DatabaseSync } from "node:sqlite";
-import type { SQLInputValue, SQLOutputValue } from "node:sqlite";
+import type { SQLInputValue, SQLOutputValue, StatementColumnMetadata } from "node:sqlite";
 import { EXT, SOF, SQLITE_CONTENT_TYPE, SQL_TEXT, OperationError, array, extension, fail, isSqlContentType, object, text } from "./fhir.js";
 import type { Artifact, FhirObject, Json } from "./fhir.js";
 import type { RelationBinding } from "./models.js";
-import { quoteIdentifier as q } from "./schema.js";
+import { sqliteType } from "./models.js";
+import { readRelation } from "./relation.js";
+import { quoteIdentifier as q, sqliteNameKey } from "./schema.js";
 import { Catalog, parameters } from "./store.js";
 
 export interface QueryResult {
   columns: string[];
   rows: Record<string, Json>[];
 }
+
+export interface PreparedResult {
+  descriptors: (StatementColumnMetadata & { primitive?: string })[];
+  rows: Record<string, SQLOutputValue>[];
+}
+
+interface BatchSubject { subject: Artifact; parameters?: FhirObject }
+interface BatchOptions { context?: Artifact[]; limit?: number }
 
 export interface ExecutionOptions {
   context?: Artifact[];
@@ -96,8 +106,22 @@ export function extractSql(resource: Artifact): string {
   return singleStatement(extractSqlText(resource));
 }
 
-function bind(resource: Artifact, supplied: FhirObject | undefined): Record<string, SQLInputValue> {
-  const declared = array(resource.parameter, "Library.parameter").map((p) => object(p));
+function declarations(resource: Artifact) {
+  const inputs: FhirObject[] = [];
+  const outputs = new Map<string, string>();
+  for (const entry of array(resource.parameter, "Library.parameter")) {
+    const p = object(entry);
+    if (p.use === "out") {
+      const name = text(p.name, "Library.parameter.name");
+      if (outputs.has(name)) fail(422, "invalid", `Duplicate output parameter: ${name}`);
+      outputs.set(name, text(p.type, "Library.parameter.type"));
+    } else if (p.use === "in") inputs.push(p);
+    else fail(422, "invalid", "Library.parameter.use must be in or out");
+  }
+  return { inputs, outputs };
+}
+
+function bind(declared: FhirObject[], supplied: FhirObject | undefined): Record<string, SQLInputValue> {
   const values = supplied ? parameters(supplied) : [];
   const result: Record<string, SQLInputValue> = Object.create(null);
   const fields: Record<string, string> = {
@@ -148,11 +172,34 @@ function bind(resource: Artifact, supplied: FhirObject | undefined): Record<stri
   return result;
 }
 
-function jsonValue(value: SQLOutputValue): Json {
+function jsonValue(value: SQLOutputValue, name: string, primitive?: string): Json {
+  if (value === null) return null;
+  if (primitive === "integer64" || primitive === "integer") {
+    if (typeof value !== "bigint" && !(typeof value === "number" && Number.isSafeInteger(value))) {
+      fail(422, "invalid", `${name} cannot be represented as ${primitive}`);
+    }
+    const integer = BigInt(value);
+    if (primitive === "integer64") return integer.toString();
+    if (integer < -2147483648n || integer > 2147483647n) fail(422, "invalid", `${name} exceeds the integer range`);
+    return Number(integer);
+  }
+  if (primitive === "decimal") {
+    if ((typeof value !== "number" && typeof value !== "bigint") || !Number.isFinite(Number(value)) ||
+      (typeof value === "bigint" && !Number.isSafeInteger(Number(value)))) fail(422, "invalid", `${name} cannot be represented as a lossless finite JSON number`);
+    return Number(value);
+  }
   if (typeof value === "bigint") return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : value.toString();
   if (value instanceof Uint8Array) return Buffer.from(value).toString("base64");
   if (typeof value === "number" && !Number.isFinite(value)) fail(422, "invalid", "Non-finite SQL result cannot be represented in JSON");
   return value;
+}
+
+export function jsonResult(result: PreparedResult): QueryResult {
+  return {
+    columns: result.descriptors.map((c) => c.name),
+    rows: result.rows.map((row) => Object.fromEntries(result.descriptors.map(({ name, primitive }) =>
+      [name, jsonValue(row[name]!, name, primitive)]))),
+  };
 }
 
 function parameterNames(sql: string): Set<string> {
@@ -178,6 +225,8 @@ function parameterNames(sql: string): Set<string> {
 }
 
 export class QueryEngine {
+  private readonly originTypes = new Map<string, Map<string, string | undefined>>();
+
   constructor(
     private readonly database: string,
     readonly catalog: Catalog,
@@ -185,6 +234,11 @@ export class QueryEngine {
     readonly maxRows = 1000,
   ) {
     if (!Number.isSafeInteger(maxRows) || maxRows < 1) throw new Error("maxRows must be a positive safe integer");
+    for (const binding of bindings) {
+      const relation = readRelation(binding.model);
+      if (relation) this.originTypes.set(sqliteNameKey(binding.table), new Map(relation.columns.map((c) =>
+        [sqliteNameKey(binding.columns.get(c.name) ?? c.physicalName), c.primitive])));
+    }
   }
 
   private compile(resource: Artifact, lookup: (canonical: string) => Artifact, stack: Set<string>, dependency = false): string {
@@ -233,7 +287,7 @@ export class QueryEngine {
     if (resource.resourceType !== "Library") fail(422, "not-supported", "Unsupported execution subject");
     const kind = libraryKind(resource);
     if (dependency && kind !== "sql-view") fail(422, "invalid", "Only SQLView Libraries may be used as dependencies");
-    if (dependency && array(resource.parameter, "Library.parameter").length) fail(422, "not-supported", "Parameterized SQLView dependencies are not implemented");
+    if (dependency && declarations(resource).inputs.length) fail(422, "not-supported", "Parameterized SQLView dependencies are not implemented");
     const labels = new Set<string>();
     const ctes: string[] = [];
     for (const value of array(resource.relatedArtifact, "Library.relatedArtifact")) {
@@ -253,10 +307,11 @@ export class QueryEngine {
     return this.runBatch([{ subject, ...(options.parameters ? { parameters: options.parameters } : {}) }], options)[0]!;
   }
 
-  runBatch(
-    subjects: { subject: Artifact; parameters?: FhirObject }[],
-    options: { context?: Artifact[]; limit?: number } = {},
-  ): QueryResult[] {
+  runBatch(subjects: BatchSubject[], options: BatchOptions = {}): QueryResult[] {
+    return this.runPreparedBatch(subjects, options).map(jsonResult);
+  }
+
+  runPreparedBatch(subjects: BatchSubject[], options: BatchOptions = {}): PreparedResult[] {
     const context = options.context ?? [];
     const contextUrls = new Set<string>();
     for (const resource of context) {
@@ -279,11 +334,12 @@ export class QueryEngine {
       if (subject.resourceType !== "Library" && subject.resourceType !== "ViewDefinition") fail(422, "not-supported", "Execution subjects must be Library or ViewDefinition");
       const sql = this.compile(subject, lookup, new Set());
       if (supplied && subject.resourceType !== "Library") fail(400, "invalid", "Query parameters apply only to Library subjects");
-      const bindings = subject.resourceType === "Library" ? bind(subject, supplied) : {};
+      const { inputs, outputs } = declarations(subject);
+      const bindings = bind(inputs, supplied);
       for (const name of parameterNames(sql)) {
         if (!Object.hasOwn(bindings, name)) fail(422, "invalid", `SQL parameter is not declared: ${name}`);
       }
-      return { sql, bindings };
+      return { sql, bindings, outputs };
     });
     for (const resource of context) {
       if (!used.has(resource)) fail(400, "invalid", `Context artifact did not match a dependency: ${resource.url}`);
@@ -299,24 +355,30 @@ export class QueryEngine {
         return [constants.SQLITE_SELECT, constants.SQLITE_READ, constants.SQLITE_FUNCTION, constants.SQLITE_RECURSIVE].includes(action) ?
           constants.SQLITE_OK : constants.SQLITE_DENY;
       });
-      return compiled.map(({ sql, bindings }) => {
+      return compiled.map(({ sql, bindings, outputs }) => {
         const statement = db.prepare(sql);
-        const columns = statement.columns().map((c) => c.name);
+        const descriptors = statement.columns().map((c) => {
+          const physical = c.table !== null && c.column !== null ?
+            this.originTypes.get(sqliteNameKey(c.table))?.get(sqliteNameKey(c.column)) : undefined;
+          const primitive = physical ?? (c.type ? sqliteType(c.type).fhir : outputs.get(c.name));
+          return { ...c, ...(primitive ? { primitive } : {}) };
+        });
+        const columns = descriptors.map((c) => c.name);
         if (!columns.length) fail(422, "invalid", "Subject must be a row-producing read-only query");
         if (new Set(columns).size !== columns.length) fail(422, "invalid", "Duplicate output column names; use explicit SQL aliases");
         statement.setReadBigInts(true);
         statement.setAllowBareNamedParameters(false);
         // Declared optional parameters may legitimately not appear in the SQL text.
         statement.setAllowUnknownNamedParameters(true);
-        const rows: Record<string, Json>[] = [];
+        const rows: PreparedResult["rows"] = [];
         if (options.limit !== 0) {
           for (const row of statement.iterate(bindings)) {
             if (rows.length >= this.maxRows) fail(422, "too-costly", `Result exceeds ${this.maxRows} rows; supply _limit or narrow the query`);
-            rows.push(Object.fromEntries(columns.map((name) => [name, jsonValue(row[name]!)])));
+            rows.push(row);
             if (options.limit !== undefined && rows.length === options.limit) break;
           }
         }
-        return { columns, rows };
+        return { descriptors, rows };
       });
     } catch (error) {
       if (error instanceof OperationError) throw error;

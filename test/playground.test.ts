@@ -45,7 +45,7 @@ test("table previews page bounded rows and reject unknown relations and invalid 
   const response = await get("name=visit&limit=1&offset=1");
   assert.equal(response.status, 200);
   const preview = await response.json() as TablePreview;
-  assert.equal(preview.rows[0]!.id, 11);
+  assert.equal(preview.rows[0]!.id, "11");
   assert.equal(preview.offset, 1);
   assert.equal(preview.limit, 1);
   assert.equal(preview.mayHaveMore, true);
@@ -67,7 +67,8 @@ test("table previews quote actual identifiers instead of treating table names as
   db.exec(`CREATE TABLE "odd"";name" (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO "odd"";name" VALUES (1, 'kept');`);
   db.close();
   const result = previewTable(readSqliteSchema(database), engine, new URLSearchParams({ name: 'odd";name', limit: "1" }));
-  assert.deepEqual(result.rows, [{ id: 1, value: "kept" }]);
+  // Added after the binding registry was created: the statement origin still supplies INTEGER.
+  assert.deepEqual(result.rows, [{ id: "1", value: "kept" }]);
 });
 
 test("SQL generates an annotated SQLite Library which can be saved, reloaded and invoked through FHIR operations", async (t) => {

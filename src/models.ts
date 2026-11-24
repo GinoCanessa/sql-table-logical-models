@@ -1,12 +1,29 @@
 import { createHash } from "node:crypto";
-import { EXT, RELATION, fail, sqliteContentTypeExtension } from "./fhir.js";
+import { EXT, RELATION, SOF_RELATION, SQLITE_CONTENT_TYPE, fail, sqliteContentTypeExtension } from "./fhir.js";
 import type { Artifact, FhirObject, Json } from "./fhir.js";
-import type { SqlSchema } from "./schema.js";
+import type { SqlColumn, SqlRelation, SqlSchema } from "./schema.js";
 import { sqliteNameKey } from "./schema.js";
+import { columnElement } from "./relation.js";
+import type { ColumnFacts, TypeEncoding } from "./relation.js";
 
 export interface ModelOptions {
   baseUrl?: string;
   version?: string;
+  typeEncoding?: TypeEncoding;
+  relationBase?: "local" | "sof";
+  integerType?: "integer64" | "integer" | "auto";
+}
+
+export function modelSettings(input: { typeEncoding?: string; relationBase?: string; integerType?: string }) {
+  function choice<const T extends string>(flag: string, value: string | undefined, choices: readonly [T, ...T[]]): T {
+    return value === undefined ? choices[0] : choices.find((v) => v === value) ??
+      fail(400, "invalid", `--${flag} must be one of ${choices.join(", ")}`);
+  }
+  return {
+    typeEncoding: choice("type-encoding", input.typeEncoding, ["mapping", "extension", "both"]),
+    relationBase: choice("relation-base", input.relationBase, ["local", "sof"]),
+    integerType: choice("integer-type", input.integerType, ["integer64", "integer", "auto"]),
+  };
 }
 
 export interface RelationBinding {
@@ -40,6 +57,40 @@ export function sqliteType(declared: string): { affinity: string; fhir: string; 
   return type === "" ? { ...result, warning: "No declared type; string is an authoring hint, not an observed storage class." } : result;
 }
 
+function tableColumn(table: SqlRelation, column: SqlColumn, integerType: ModelOptions["integerType"]): ColumnFacts {
+  const mapped = sqliteType(column.declaredType);
+  // Widths in type names are never bounds. Recognize only a complete, literal
+  // BETWEEN predicate, not a subexpression (which could be negated or optional).
+  const bounded = integerType === "auto" && table.checks?.some((sql) => {
+    const range = /^([A-Za-z_]\w*)\s+BETWEEN\s+(-?\d+)\s+AND\s+(-?\d+)$/i.exec(sql);
+    if (!range || sqliteNameKey(range[1]!) !== sqliteNameKey(column.name)) return false;
+    const low = BigInt(range[2]!), high = BigInt(range[3]!);
+    return low >= -2147483648n && high <= 2147483647n && low <= high;
+  });
+  const length = mapped.fhir === "string" && /^(?:N?CHAR|N?VARCHAR|CHARACTER(?:\s+VARYING)?|VARYING\s+CHARACTER)\s*\(\s*(\d+)\s*\)$/i.exec(column.declaredType.trim());
+  const maxLength = length ? Number(length[1]) : undefined;
+  return {
+    name: stableName(column.name, "c_"), physicalName: column.name,
+    primitive: mapped.fhir === "integer64" && (integerType === "integer" || bounded) ? "integer" : mapped.fhir,
+    sqlTypes: column.declaredType ? [{ declaredType: column.declaredType, dialect: SQLITE_CONTENT_TYPE }] : [],
+    min: column.nullable ? 0 : 1, max: "1", mustHaveValue: !column.nullable,
+    ...(maxLength !== undefined && maxLength <= 2147483647 ? { maxLength } : {}),
+    ...(mapped.warning ? { warning: mapped.warning } : {}),
+    primaryKey: column.primaryKeyPosition > 0,
+    ...(column.primaryKeyPosition > 0 ? { primaryKeyPosition: column.primaryKeyPosition } : {}),
+  };
+}
+
+function checkConstraint(sql: string, index: number, table: SqlRelation): FhirObject {
+  const match = /^([A-Za-z_]\w*)\s+IS\s+(NOT\s+)?NULL$/i.exec(sql);
+  const column = match && table.columns.find((c) => sqliteNameKey(c.name) === sqliteNameKey(match[1]!));
+  return {
+    key: `check-${index + 1}`, severity: "error", human: sql,
+    extension: [{ url: `${EXT}/sql-expression`, valueString: sql }],
+    ...(column ? { expression: `\`${stableName(column.name, "c_")}\`.${match[2] ? "exists" : "empty"}()` } : {}),
+  };
+}
+
 export function relationBase(): Artifact {
   return {
     resourceType: "StructureDefinition", id: "experimental-relation-base", url: RELATION,
@@ -54,6 +105,7 @@ export function relationBase(): Artifact {
 export function createLogicalModels(schema: SqlSchema, options: ModelOptions = {}): {
   bundle: FhirObject; bindings: RelationBinding[]; resources: Artifact[];
 } {
+  const settings = modelSettings(options);
   const base = (options.baseUrl ?? "https://example.org/sql").replace(/\/+$/, "");
   if (!/^https?:\/\/[^?#|\s]+$/.test(base)) fail(400, "invalid", "baseUrl must be an absolute HTTP(S) canonical base without query, fragment or version");
   if (options.version !== undefined && (!options.version.trim() || options.version.includes("|"))) fail(400, "invalid", "version must be non-empty and cannot contain '|'");
@@ -62,31 +114,17 @@ export function createLogicalModels(schema: SqlSchema, options: ModelOptions = {
   const bindings: RelationBinding[] = schema.relations.map((table) => {
     const name = names.get(table.name)!;
     const url = urls.get(table.name)!;
-    const columns = new Map(table.columns.map((c) => [stableName(c.name, "c_"), c.name]));
+    const facts = table.columns.map((c) => tableColumn(table, c, settings.integerType));
+    const columns = new Map(facts.map((c) => [c.name, c.physicalName]));
     const elements: Json[] = [{
       id: name, path: name, min: 0, max: "*", short: `${table.kind} ${table.name}`,
-      mapping: [{ identity: "sql", map: table.name }],
+      ...(table.checks?.length ? { constraint: table.checks.map((sql, i) => checkConstraint(sql, i, table)) } : {}),
     }];
-    for (const column of table.columns) {
-      const columnName = stableName(column.name, "c_");
-      const mapped = sqliteType(column.declaredType);
-      const extensions: Json[] = [
-        { url: `${EXT}/sql-name`, valueString: column.name },
-        { url: `${EXT}/sql-type`, valueString: column.declaredType },
-        { url: `${EXT}/sqlite-affinity`, valueCode: mapped.affinity },
-      ];
-      if (column.primaryKeyPosition) extensions.push({ url: `${EXT}/primary-key-position`, valueInteger: column.primaryKeyPosition });
+    for (const [i, column] of table.columns.entries()) {
+      const extensions: FhirObject[] = [];
       if (column.defaultSql !== null) extensions.push({ url: `${EXT}/sql-default`, valueString: column.defaultSql });
       if (column.generated) extensions.push({ url: `${EXT}/generated`, valueCode: column.generated });
-      elements.push({
-        id: `${name}.${columnName}`, path: `${name}.${columnName}`,
-        min: column.nullable ? 0 : 1, max: "1",
-        type: [{ code: mapped.fhir }],
-        short: column.name,
-        comment: [mapped.warning, "FHIR type is a schema-derived hint; SQLite values are not validated or coerced."].filter(Boolean).join(" "),
-        extension: extensions,
-        mapping: [{ identity: "sql", map: column.declaredType || "(undeclared)" }],
-      });
+      elements.push(columnElement(name, facts[i]!, settings.typeEncoding, extensions));
     }
     const foreignKeys: Json[] = table.foreignKeys.map((fk) => {
       const targetUrl = [...urls.entries()].find(([n]) => sqliteNameKey(n) === sqliteNameKey(fk.targetTable))?.[1];
@@ -114,17 +152,20 @@ export function createLogicalModels(schema: SqlSchema, options: ModelOptions = {
       ...(options.version ? { version: options.version } : {}),
       status: "draft", experimental: true, fhirVersion: "5.0.0",
       kind: "logical", abstract: false, type: url,
-      baseDefinition: RELATION, derivation: "specialization",
-      description: `Schema-derived ${schema.dialect} ${table.kind}. Physical binding is local configuration, not a portable data URL.`,
-      mapping: [{ identity: "sql", name: "SQLite declared storage type" }],
+      baseDefinition: settings.relationBase === "local" ? RELATION : SOF_RELATION, derivation: "specialization",
+      description: `Schema-derived ${schema.dialect} ${table.kind}. FHIR types are schema-derived hints. SQLite type names do not enforce declared lengths or numeric bounds. Physical binding is local configuration, not a portable data URL.`,
+      ...(settings.typeEncoding !== "extension" ? { mapping: [{ identity: "sql", name: "SQLite declared storage type" }] } : {}),
       extension: [
         sqliteContentTypeExtension(),
-        { url: `${EXT}/sql-name`, valueString: table.name },
+        ...(name !== table.name ? [{ url: `${EXT}/sql-name`, valueString: table.name }] : []),
         { url: `${EXT}/relation-kind`, valueCode: table.kind },
         { url: `${EXT}/sql-ddl`, valueString: table.ddl },
-        { url: `${EXT}/sqlite-strict`, valueBoolean: table.strict },
-        { url: `${EXT}/sqlite-without-rowid`, valueBoolean: table.withoutRowid },
+        ...(table.strict ? [{ url: `${EXT}/sqlite-strict`, valueBoolean: true }] : []),
+        ...(table.withoutRowid ? [{ url: `${EXT}/sqlite-without-rowid`, valueBoolean: true }] : []),
         ...foreignKeys,
+        ...table.indexes.filter((i) => i.unique && i.origin !== "pk" && !i.partial && i.columns.every((c) => c.name !== null)).map((i) => ({
+          url: `${EXT}/unique-key`, extension: i.columns.map((c) => ({ url: "column", valueString: stableName(c.name!, "c_") })),
+        })),
         ...table.indexes.map((index) => ({
           url: `${EXT}/sql-index`, valueString: JSON.stringify(index),
         })),

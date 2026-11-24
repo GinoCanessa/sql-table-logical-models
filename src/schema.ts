@@ -37,6 +37,7 @@ export interface SqlRelation {
   columns: SqlColumn[];
   foreignKeys: SqlForeignKey[];
   indexes: SqlIndex[];
+  checks?: string[];
 }
 
 export interface SqlSchema {
@@ -54,6 +55,30 @@ export function quoteIdentifier(name: string): string {
 
 export function sqliteNameKey(name: string): string {
   return name.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+// Only CHECK tokens at table-definition depth start constraints. Skip quoted tokens
+// and comments as units, but slice the original SQL so the predicate stays lossless.
+function tableChecks(ddl: string): string[] {
+  const checks: string[] = [];
+  if (!/^CREATE\s+TABLE\b/i.test(ddl)) return checks;
+  const tokens = /--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|[\w$\u0080-\uFFFF]+|[^\s]/g;
+  let depth = 0, start = -1, check = false;
+  for (const token of ddl.matchAll(tokens)) {
+    const s = token[0];
+    if (s.startsWith("--") || s.startsWith("/*")) continue;
+    if (s === "(") {
+      if (check) start = token.index + 1;
+      depth++;
+    } else if (s === ")") {
+      if (--depth === 1 && start >= 0) {
+        checks.push(ddl.slice(start, token.index).trim());
+        start = -1;
+      }
+    }
+    check = depth === 1 && s.toUpperCase() === "CHECK";
+  }
+  return checks;
 }
 
 export class SqliteSchemaReader implements SchemaReader {
@@ -110,7 +135,7 @@ export class SqliteSchemaReader implements SchemaReader {
           defaultSql: c.dflt_value === null ? null : String(c.dflt_value),
           generated: c.hidden === 2 ? "virtual" : c.hidden === 3 ? "stored" : null,
         })),
-        foreignKeys: [...foreignKeys.values()], indexes,
+        foreignKeys: [...foreignKeys.values()], indexes, checks: tableChecks(String(table.sql ?? "")),
       };
     });
     for (const relation of relations) {

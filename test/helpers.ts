@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import { createApp } from "../src/server.js";
 import type { ServerOptions } from "../src/server.js";
 
-export function fixture(t: TestContext, maxRows = 1000) {
+export function fixture(t: TestContext, maxRows = 1000, extraSchema = "") {
   const root = resolve(".data");
   mkdirSync(root, { recursive: true });
   const directory = mkdtempSync(join(root, "test-"));
@@ -24,8 +24,10 @@ export function fixture(t: TestContext, maxRows = 1000) {
   const database = join(directory, "source.sqlite");
   const artifacts = join(directory, "artifacts.sqlite");
   const db = new DatabaseSync(database);
-  db.exec(readFileSync(new URL("../../examples/clinic.sql", import.meta.url), "utf8"));
-  db.close();
+  try {
+    db.exec(readFileSync(new URL("../../examples/clinic.sql", import.meta.url), "utf8"));
+    if (extraSchema) db.exec(extraSchema);
+  } finally { db.close(); }
   const models = createLogicalModels(readSqliteSchema(database));
   const store = new ArtifactStore(artifacts);
   cleanup.push(() => store.close());
@@ -41,8 +43,8 @@ export function sample(id: string) {
   return array(bundle.entry, "entry").map((e) => artifact(object(e).resource)).find((r) => r.id === id)!;
 }
 
-export async function serverFixture(t: TestContext, options: Omit<ServerOptions, "database" | "artifacts"> = {}) {
-  const setup = fixture(t, options.maxRows);
+export async function serverFixture(t: TestContext, options: Omit<ServerOptions, "database" | "artifacts"> = {}, extraSchema = "") {
+  const setup = fixture(t, options.maxRows, extraSchema);
   const app = createApp({ database: setup.database, artifacts: setup.artifacts, ...options });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");

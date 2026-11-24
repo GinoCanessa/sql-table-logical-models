@@ -1,8 +1,15 @@
 import { DatabaseSync } from "node:sqlite";
 import { array, fail, object, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
+import { readRelation } from "./relation.js";
 
 export const RESOURCE_TYPES = ["StructureDefinition", "Library", "ViewDefinition"];
+
+function interpret(resource: Artifact, issues?: FhirObject[]): Artifact {
+  const relation = readRelation(resource);
+  if (relation && issues) issues.push(...relation.issues);
+  return resource;
+}
 
 export function artifact(value: unknown, requireId = true): Artifact {
   const resource = object(value, "artifact");
@@ -47,8 +54,8 @@ export class ArtifactStore {
     return row ? artifact(JSON.parse(String(row.json))) : undefined;
   }
 
-  put(value: unknown): Artifact {
-    const resource = artifact(value);
+  put(value: unknown, issues?: FhirObject[]): Artifact {
+    const resource = interpret(artifact(value), issues);
     try {
       this.db.prepare(`INSERT INTO artifacts(resource_type, id, url, version, json) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(resource_type, id) DO UPDATE SET url=excluded.url, version=excluded.version, json=excluded.json`)
@@ -81,32 +88,32 @@ export class Catalog {
     return [...this.generated, ...this.store.list()].filter((r) => !type || r.resourceType === type);
   }
 
-  get(reference: string): Artifact {
+  get(reference: string, issues?: FhirObject[]): Artifact {
     if (!/^(StructureDefinition|Library|ViewDefinition)\/[A-Za-z0-9.-]{1,64}$/.test(reference)) {
       fail(400, "invalid", "subjectReference must be a local ResourceType/id reference");
     }
-    return this.list().find((r) => `${r.resourceType}/${r.id}` === reference) ??
-      fail(404, "not-found", `Artifact not found: ${reference}`);
+    return interpret(this.list().find((r) => `${r.resourceType}/${r.id}` === reference) ??
+      fail(404, "not-found", `Artifact not found: ${reference}`), issues);
   }
 
-  resolve(canonical: string, context: Artifact[] = []): Artifact {
+  resolve(canonical: string, context: Artifact[] = [], issues?: FhirObject[]): Artifact {
     const [url, version, extra] = canonical.split("|");
     if (!url || extra !== undefined || (canonical.includes("|") && !version)) fail(400, "invalid", "Invalid canonical reference");
     const match = (r: Artifact) => r.url === url && (version === undefined || r.version === version);
     const supplied = context.filter(match);
     const candidates = supplied.length ? supplied : this.list().filter(match);
     if (candidates.length > 1) fail(409, "conflict", `Ambiguous canonical; pin a unique version: ${canonical}`);
-    return candidates[0] ?? fail(404, "not-found", `Unresolved dependency: ${canonical}`);
+    return interpret(candidates[0] ?? fail(404, "not-found", `Unresolved dependency: ${canonical}`), issues);
   }
 
-  put(value: unknown): Artifact {
+  put(value: unknown, issues?: FhirObject[]): Artifact {
     const resource = artifact(value);
     if (this.generated.some((r) =>
       (r.resourceType === resource.resourceType && r.id === resource.id) ||
       (resource.url && r.url === resource.url && r.version === resource.version))) {
       fail(409, "conflict", "Generated schema artifacts are read-only; change the database and restart");
     }
-    return this.store.put(resource);
+    return this.store.put(resource, issues);
   }
 }
 
