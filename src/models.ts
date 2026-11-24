@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { EXT, RELATION, SOF_RELATION, SQLITE_CONTENT_TYPE, fail, sqliteContentTypeExtension } from "./fhir.js";
+import { isDeepStrictEqual } from "node:util";
+import { EXT, RELATION, SOF, SOF_RELATION, SQLITE_CONTENT_TYPE, array, extension, fail, object, sqliteContentTypeExtension, text } from "./fhir.js";
 import type { Artifact, FhirObject, Json } from "./fhir.js";
 import type { SqlColumn, SqlRelation, SqlSchema } from "./schema.js";
 import { sqliteNameKey } from "./schema.js";
-import { columnElement, primitives, requireValid } from "./relation.js";
+import { columnElement, primitiveValue, primitives, relationColumns, requireValid, validBinding } from "./relation.js";
 import type { ColumnFacts, TypeEncoding } from "./relation.js";
 
 export interface ModelOptions {
@@ -12,6 +13,7 @@ export interface ModelOptions {
   typeEncoding?: TypeEncoding;
   relationBase?: "local" | "sof";
   integerType?: "integer64" | "integer" | "auto";
+  annotations?: FhirObject[];
 }
 
 export function modelSettings(input: { typeEncoding?: string; relationBase?: string; integerType?: string }) {
@@ -30,6 +32,58 @@ export interface RelationBinding {
   model: Artifact;
   table: string;
   columns: Map<string, string>;
+  curated?: boolean;
+}
+
+function storageType(sql: string): string {
+  // Only known synonyms are interchangeable; retain type parameters (including precision/scale).
+  return sql.trim().toUpperCase().replace(/\s+/g, " ").replace(/\s*([(),])\s*/g, "$1")
+    .replace(/^(?:INT|TINYINT|SMALLINT|BIGINT|INT2|INT8)\b/, "INTEGER")
+    .replace(/^BOOL\b/, "BOOLEAN").replace(/^NUMERIC\b/, "DECIMAL")
+    .replace(/^(?:CHARACTER VARYING|VARYING CHARACTER|NVARCHAR)\b/, "VARCHAR").replace(/^(?:NCHAR|CHARACTER)\b/, "CHAR")
+    .replace(/^CLOB\b/, "TEXT").replace(/^(?:DOUBLE(?: PRECISION)?|FLOAT)\b/, "REAL").replace(/^TIMESTAMP\b/, "DATETIME");
+}
+
+/** Only operator configuration supplies the target. A model contributes a checked projection, never SQL. */
+export class ConfiguredRelations {
+  private readonly targets = new Map<string, SqlRelation>();
+
+  constructor(config: Record<string, string>, schema: SqlSchema, generated: Artifact[], private readonly integerType: ModelOptions["integerType"]) {
+    for (const [key, value] of Object.entries(object(config, "relations"))) {
+      if (!/^https?:\/\/[^|?#\s]+\|[^|\s]+$/.test(key) || !URL.canParse(key.split("|")[0]!)) fail(422, "invalid", `Expected an exact canonical|version in relations: ${key}`);
+      if (generated.some((r) => `${r.url}|${r.version ?? ""}` === key)) fail(422, "invalid", `Cannot reconfigure generated Relation: ${key}`);
+      const name = text(value, `table for ${key}`);
+      const matches = schema.relations.filter((r) => r.kind === "table" && sqliteNameKey(r.name) === sqliteNameKey(name));
+      if (matches.length !== 1) fail(422, "invalid", `Expected one existing main table for ${key}: ${name}`);
+      this.targets.set(key, matches[0]!);
+    }
+  }
+
+  has(model: Artifact): boolean { return this.targets.has(`${model.url}|${model.version ?? ""}`); }
+
+  bind(model: Artifact): RelationBinding {
+    const table = this.targets.get(`${model.url}|${model.version ?? ""}`) ?? fail(422, "not-found", "No configured physical relation");
+    const columns = new Map<string, string>(), used = new Set<string>();
+    for (const c of relationColumns(model)) {
+      const key = sqliteNameKey(c.physicalName);
+      const physical = table.columns.find((col) => sqliteNameKey(col.name) === key);
+      const at = `${model.name}.${c.name} → ${table.name}.${c.physicalName}`;
+      if (!physical || used.has(key)) fail(422, "invalid", `Missing or duplicate physical column: ${at}`);
+      const facts = tableColumn(table, physical, this.integerType);
+      if (!physical.declaredType.trim() || c.max !== "1" || !c.primitive || c.primitive !== facts.primitive) {
+        fail(422, "invalid", `Incompatible or unknown column type/cardinality: ${at} (${physical.declaredType || "untyped"})`);
+      }
+      if ((c.min && !facts.min) || (c.primaryKey && !facts.primaryKey) || (c.maxLength !== undefined && c.maxLength !== facts.maxLength) ||
+        (c.primaryKeyPosition !== undefined && c.primaryKeyPosition !== facts.primaryKeyPosition)) fail(422, "invalid", `Incompatible nullability, length or key: ${at}`);
+      for (const m of c.sqlTypes) {
+        if ((!m.dialect || m.dialect.toLowerCase() === SQLITE_CONTENT_TYPE || m.dialect === "application/sql") &&
+          storageType(m.declaredType) !== storageType(physical.declaredType)) fail(422, "invalid", `Incompatible SQLite mapping: ${at} (${m.declaredType} vs ${physical.declaredType})`);
+      }
+      columns.set(c.name, physical.name);
+      used.add(key);
+    }
+    return { model, table: table.name, columns, curated: true };
+  }
 }
 
 export function stableName(name: string, prefix: string): string {
@@ -110,6 +164,159 @@ export function relationBase(): Artifact {
   };
 }
 
+function mergeAnnotations(bindings: RelationBinding[], overlays: FhirObject[]) {
+  const written = new Map<FhirObject, Map<string, Json>>();
+  const touched = new Set<Artifact>();
+  const strengths = ["example", "preferred", "extensible", "required"];
+  for (const entry of array(overlays, "annotations")) {
+    const overlay = object(entry, "partial StructureDefinition");
+    const extensions = array(overlay.extension, "overlay.extension").map((x) => object(x));
+    const sqlName = (x: FhirObject) => x.url === `${EXT}/sql-name` || x.url === `${SOF}/StructureDefinition/sql-name`;
+    const names = extensions.filter(sqlName);
+    if (names.length > 1 || (overlay.url === undefined && !names.length)) fail(422, "invalid", "Annotation requires a unique URL or sql-name selector");
+    const physical = names.length ? text(names[0]!.valueString, "sql-name") : undefined;
+    const matches = bindings.filter((b) => (overlay.url === undefined || b.model.url === overlay.url) && (physical === undefined || b.table === physical));
+    if (matches.length !== 1) fail(422, "invalid", `Expected exactly one annotation target: ${overlay.url ?? ""} ${physical ?? ""}`);
+    const model = matches[0]!.model;
+    touched.add(model);
+    const elements = array(object(model.differential).element, "elements").map((e) => object(e));
+    const facts = new Map(relationColumns(model).map((c) => [`${model.name}.${c.name}`, c]));
+    const merge = (target: FhirObject, patch: FhirObject, level: "model" | "root" | "leaf") => {
+      const seen = written.get(target) ?? new Map<string, Json>();
+      written.set(target, seen);
+      const invalid = (key: string): never => fail(422, "invalid", `Invalid or contradictory annotation at ${target.path ?? model.url}.${key}`);
+      const author = (key: string, value: Json, append = false) => {
+        if (seen.has(key)) {
+          if (!isDeepStrictEqual(seen.get(key), value)) invalid(key);
+          return;
+        }
+        seen.set(key, value);
+        const prior = target[key];
+        target[key] = append && prior && prior !== value ? `${prior}\n${value}` : structuredClone(value);
+      };
+      const column = facts.get(String(target.path));
+      const primitive = column?.primitive ?? "";
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) invalid(key);
+        if (level === "model" && key === "differential") continue;
+        if (key === "extension") {
+          const entries = array(value, key);
+          if (!entries.length) invalid(key);
+          for (const x of entries.map((e) => object(e))) {
+            if (sqlName(x) && (level === "model" || (column && x.valueString === column.physicalName)) &&
+              Object.keys(x).every((k) => ["url", "valueString"].includes(k))) continue;
+            if (level === "model" && x.valueBoolean === false && [`${EXT}/sqlite-strict`, `${EXT}/sqlite-without-rowid`].includes(String(x.url)) &&
+              Object.keys(x).length === 2 && !extension(target, String(x.url))) continue;
+            if (!array(target.extension, key).some((e) => isDeepStrictEqual(e, x))) invalid(key);
+          }
+          continue;
+        }
+        if (level !== "model" && key === "mapping") {
+          const mappings = [...array(target.mapping, key)];
+          const entries = array(value, key);
+          if (!entries.length) invalid(key);
+          for (const m of entries.map((e) => object(e))) {
+            text(m.identity, "mapping.identity"); text(m.map, "mapping.map");
+            if (m.identity === "sql") {
+              if (Object.keys(m).some((k) => !["identity", "language", "map"].includes(k)) ||
+                !column?.sqlTypes.some((s) => s.declaredType === m.map && s.dialect === (m.language ?? SQLITE_CONTENT_TYPE))) invalid(key);
+            } else if (!mappings.some((e) => isDeepStrictEqual(e, m))) mappings.push(structuredClone(m));
+          }
+          if (mappings.length) target.mapping = mappings;
+          continue;
+        }
+        if (level === "leaf" && key === "type") {
+          const types = array(value, key).map((e) => object(e));
+          const derived = object(array(columnElement(String(model.name), column!, "extension", []).type, key)[0]);
+          if (types.length !== 1 || types[0]!.code !== primitive ||
+            !Object.entries(types[0]!).every(([k, v]) => isDeepStrictEqual(derived[k], v))) invalid(key);
+          continue;
+        }
+        const prose = level === "model" ? ["description", "title", "copyright", "purpose"] :
+          ["short", "definition", "comment", "label", "requirements", ...(level === "leaf" ? ["meaningWhenMissing"] : [])];
+        if (prose.includes(key)) {
+          author(key, text(value, key), key === "description" || key === "comment");
+        } else if (level !== "model" && (["alias", "code", "constraint"].includes(key) || (level === "leaf" && ["condition", "example"].includes(key)))) {
+          const items = [...array(target[key], key)], additions = array(value, key);
+          if (!additions.length) invalid(key);
+          for (const item of additions) {
+            if (key === "alias" || key === "condition") text(item, key);
+            else {
+              const o = object(item, key);
+              if (key === "code") {
+                text(o.code, "code.code");
+                if (Object.entries(o).some(([k, v]) => k === "userSelected" ? typeof v !== "boolean" :
+                  !["system", "version", "code", "display"].includes(k) || typeof v !== "string")) invalid(key);
+              }
+              if (key === "example") {
+                text(o.label, "example.label");
+                const field = `value${primitive[0]!.toUpperCase()}${primitive.slice(1)}`;
+                if (!primitiveValue(primitive, o[field]) || Object.keys(o).some((k) => k !== field && k !== "label")) invalid(key);
+              }
+              if (key === "constraint") {
+                text(o.key, "constraint.key"); text(o.human, "constraint.human");
+                if (o.severity !== "error" && o.severity !== "warning") invalid(key);
+              }
+            }
+            if (!items.some((i) => isDeepStrictEqual(i, item))) {
+              if (key === "example" && items.some((i) => object(i).label === object(item).label)) invalid(key);
+              items.push(structuredClone(item));
+            }
+          }
+          target[key] = items;
+        } else if (level === "leaf" && key === "binding") {
+          const b = object(value, "binding");
+          const prior = target.binding === undefined ? undefined : object(target.binding);
+          const next = { ...prior, ...b };
+          if (!validBinding(primitive, next) || Object.keys(b).length === 0 || Object.keys(b).some((k) => !["strength", "valueSet", "description"].includes(k)) ||
+            (b.description !== undefined && typeof b.description !== "string") ||
+            (prior?.description !== undefined && b.description !== undefined && b.description !== prior.description) ||
+            (prior && (prior.valueSet !== next.valueSet || strengths.indexOf(String(prior.strength)) > strengths.indexOf(String(next.strength)))) ||
+            (next.strength === "required" && prior?.strength !== "required")) invalid(key);
+          target[key] = next;
+        } else if (level === "leaf" && /^(?:fixed|minValue|maxValue)[A-Z]/.test(key) && target[key] === undefined) {
+          author(key, value!);
+        } else if (level === "model" && ["status", "version", "keyword", "useContext", "jurisdiction"].includes(key)) {
+          if (key === "status" && !["draft", "active", "retired", "unknown"].includes(String(value))) invalid(key);
+          if (key === "version" && (text(value, key).includes("|") || (target.version !== undefined && target.version !== value))) invalid(key);
+          if (["keyword", "useContext", "jurisdiction"].includes(key)) array(value, key).forEach((v) => object(v, key));
+          author(key, value!);
+        } else if (!(level === "leaf" && key === "mustHaveValue" && !target.mustHaveValue && value === false) &&
+          !(Object.hasOwn(target, key) && isDeepStrictEqual(target[key], value))) invalid(key);
+      }
+    };
+    merge(model, overlay, "model");
+    if (overlay.differential !== undefined) {
+      const diff = object(overlay.differential);
+      if (!Array.isArray(diff.element) || !diff.element.length || Object.keys(diff).length !== 1) fail(422, "invalid", "Expected annotation differential.element paths");
+      const paths = new Set<string>();
+      for (const item of diff.element) {
+        const patch = object(item), path = text(patch.path, "annotation path");
+        const found = elements.filter((e) => e.path === path);
+        if (paths.has(path) || found.length !== 1) fail(422, "invalid", `Unmatched or ambiguous annotation path: ${path}`);
+        paths.add(path);
+        merge(found[0]!, patch, found[0] === elements[0] ? "root" : "leaf");
+      }
+    }
+  }
+  for (const model of touched) {
+    requireValid(model);
+    for (const item of array(object(model.differential).element, "element").slice(1)) {
+      const e = object(item);
+      const primitive = String(object(array(e.type, "type")[0]).code);
+      const suffix = primitive[0]!.toUpperCase() + primitive.slice(1);
+      const comparable = (v: Json | undefined) => v === undefined ? undefined : primitive === "integer64" ? BigInt(String(v)) :
+        typeof v === "number" ? v : String(v);
+      const min = comparable(e[`minValue${suffix}`]), max = comparable(e[`maxValue${suffix}`]), fixed = comparable(e[`fixed${suffix}`]);
+      if ((min !== undefined && max !== undefined && min > max) || (fixed !== undefined &&
+        ((min !== undefined && fixed < min) || (max !== undefined && fixed > max) ||
+          (typeof e.maxLength === "number" && typeof fixed === "string" && [...fixed].length > e.maxLength)))) {
+        fail(422, "invalid", `Contradictory value constraints: ${e.path}`);
+      }
+    }
+  }
+}
+
 export function createLogicalModels(schema: SqlSchema, options: ModelOptions = {}): {
   bundle: FhirObject; bindings: RelationBinding[]; resources: Artifact[];
 } {
@@ -183,6 +390,7 @@ export function createLogicalModels(schema: SqlSchema, options: ModelOptions = {
     requireValid(model);
     return { model, table: table.name, columns };
   });
+  if (options.annotations !== undefined) mergeAnnotations(bindings, options.annotations);
   const resources = [relationBase(), ...bindings.map((b) => b.model)];
   return { bundle: { resourceType: "Bundle", type: "collection", entry: resources.map((resource) => ({ fullUrl: resource.url!, resource })) }, bindings, resources };
 }

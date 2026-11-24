@@ -82,7 +82,7 @@
             </div>
             <label for="library-url">Canonical URL (blank uses the configured base)</label><input id="library-url" type="url" placeholder="Loading canonical base...">
             <details open><summary>Relation and view dependencies</summary>
-              <p class="help">SQL uses the labels below as table names. Choose a table/model, SQLView or ViewDefinition. Physical table names also work, but dependencies make the Library portable.</p>
+              <p class="help">SQL uses the labels below as table names. Choose a generated model, a checked operator-configured model version, a SQLView or a ViewDefinition. Curated dependencies expose only their modeled columns, by logical name. Inspect authored annotations in the logical model’s FHIR JSON. Configure bindings and annotations at server startup, not here.</p>
               <div class="dependency-picker"><label class="sr-only" for="dependency-source">Dependency artifact</label><select id="dependency-source"></select><button type="button" id="add-dependency">Add dependency</button></div>
               <div id="dependencies"></div>
             </details>

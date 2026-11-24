@@ -7,7 +7,7 @@ import { BINARY_CONTENT_MODEL, EXP, OperationError, RELATION, SOF, fail, object 
 import type { Artifact, FhirObject } from "./fhir.js";
 import { QueryEngine } from "./engine.js";
 import { ExportJobs } from "./exports.js";
-import { createLogicalModels } from "./models.js";
+import { ConfiguredRelations, createLogicalModels } from "./models.js";
 import type { ModelOptions } from "./models.js";
 import { assignedId, parseDescribe, parseExport, parseRun, queryParameters, runOperation } from "./operations.js";
 import { AFF, featureDefinitions, featureQuery, featureSupport, requireFeatures } from "./features.js";
@@ -22,6 +22,7 @@ export interface ServerOptions extends ModelOptions {
   maxRows?: number;
   relationValidation?: "warn" | "error";
   verifyOutput?: boolean;
+  relations?: Record<string, string>;
 }
 
 const PLAYGROUND_FILES = new Map([
@@ -142,9 +143,12 @@ export function createApp(options: ServerOptions): { server: Server; close: () =
   }
   const schema = readSqliteSchema(options.database);
   const derived = createLogicalModels(schema, options);
+  const configured = options.relations === undefined ? undefined : new ConfiguredRelations(options.relations, schema, derived.resources, options.integerType);
   const baseUrl = (options.baseUrl ?? "https://example.org/sql").replace(/\/+$/, "");
   const store = new ArtifactStore(options.artifacts);
-  const catalog = new Catalog(store, derived.resources, options.relationValidation);
+  let catalog: Catalog;
+  try { catalog = new Catalog(store, derived.resources, options.relationValidation, configured); }
+  catch (error) { store.close(); throw error; }
   const engine = new QueryEngine(options.database, catalog, derived.bindings, options.maxRows, options);
   const jobs = new ExportJobs(options.artifacts, engine);
   engine.snapshots = () => jobs.snapshots();

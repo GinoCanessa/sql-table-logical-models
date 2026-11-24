@@ -1,4 +1,4 @@
-import { SOF, SQL_CONTENT_TYPE_EXTENSION, array, fail, isSqlContentType, object, sqlLibrary, text } from "./fhir.js";
+import { OperationError, SOF, SQL_CONTENT_TYPE_EXTENSION, array, fail, isSqlContentType, object, sqlLibrary, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
 import { extractSqlText, libraryKind, singleStatement } from "./engine.js";
 import type { QueryEngine, QueryResult } from "./engine.js";
@@ -39,7 +39,12 @@ export interface TablePreview extends QueryResult {
 
 function isDependency(resource: Artifact, engine: QueryEngine): boolean {
   if (resource.resourceType === "ViewDefinition") return true;
-  if (resource.resourceType === "StructureDefinition") return engine.bindings.some((b) => b.model === resource);
+  if (resource.resourceType === "StructureDefinition") {
+    if (engine.bindings.some((b) => b.model.url === resource.url && b.model.version === resource.version && b.model.id === resource.id)) return true;
+    if (!engine.catalog.configured?.has(resource)) return false;
+    try { return engine.catalog.resolve(`${resource.url}|${resource.version}`).id === resource.id; }
+    catch (error) { if (error instanceof OperationError) return false; throw error; }
+  }
   if (resource.resourceType !== "Library") return false;
   // Invalid stored artifacts remain inspectable, but are not offered as dependency candidates.
   const type = resource.type;

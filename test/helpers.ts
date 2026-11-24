@@ -11,6 +11,16 @@ import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../src/server.js";
 import type { ServerOptions } from "../src/server.js";
+import type { FhirObject } from "../src/fhir.js";
+
+export function operatorExamples() {
+  const load = (name: string): unknown => JSON.parse(readFileSync(new URL(`../../examples/${name}.json`, import.meta.url), "utf8"));
+  const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  const example = /### Curated clinic model\s+```json\s+([\s\S]*?)```/.exec(readme);
+  if (!example) throw new Error("Missing curated model example in README");
+  return { person: artifact(JSON.parse(example[1]!)), relations: load("relations") as Record<string, string>,
+    annotations: load("annotations") as FhirObject[] };
+}
 
 export function fixture(t: TestContext, maxRows = 1000, extraSchema = "") {
   const root = resolve(".data");

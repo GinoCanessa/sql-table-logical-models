@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { OperationError, RELATION, SOF_RELATION, array, fail, object, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
 import { hasRelationBase, validateRelation } from "./relation.js";
+import type { ConfiguredRelations, RelationBinding } from "./models.js";
 
 export const RESOURCE_TYPES = ["StructureDefinition", "Library", "ViewDefinition"];
 
@@ -81,8 +82,13 @@ export class Catalog {
   constructor(
     readonly store: ArtifactStore,
     readonly generated: Artifact[],
-    readonly validation: "warn" | "error" = "warn",
-  ) {}
+    readonly validation: "warn" | "error" = "error",
+    readonly configured?: ConfiguredRelations,
+  ) {
+    if (configured) {
+      for (const r of store.list()) if (configured.has(r)) this.resolve(`${r.url}|${r.version}`);
+    }
+  }
 
   list(type?: string): Artifact[] {
     return [...this.generated, ...this.store.list()].filter((r) => !type || r.resourceType === type);
@@ -106,30 +112,39 @@ export class Catalog {
     return candidates[0];
   }
 
-  private checked(resource: Artifact, context: Artifact[], issues?: FhirObject[], observe?: (r: Artifact) => void): Artifact {
-    if (resource.resourceType !== "StructureDefinition") return resource;
+  private checked(resource: Artifact, context: Artifact[], issues?: FhirObject[], observe?: (r: Artifact) => void,
+    onBinding?: (binding: RelationBinding) => void): Artifact {
+    const configured = this.configured?.has(resource);
+    const unrelated = () => configured ? fail(422, "invalid", `Configured canonical must identify a concrete Relation: ${resource.url}|${resource.version}`) : resource;
+    if (resource.resourceType !== "StructureDefinition") return unrelated();
     const chain = [resource];
     let current = resource;
     while (!hasRelationBase(current)) {
       if ([RELATION, SOF_RELATION].includes(String(current.url))) break;
-      if (typeof current.baseDefinition !== "string") return resource;
+      if (typeof current.baseDefinition !== "string") return unrelated();
       const parent = this.find(current.baseDefinition, context);
-      if (!parent || parent.resourceType !== "StructureDefinition") return resource;
+      if (!parent || parent.resourceType !== "StructureDefinition") return unrelated();
       if (chain.some((r) => r.url === parent.url && r.version === parent.version)) fail(422, "invalid", "Relation baseDefinition cycle");
       observe?.(parent);
       chain.push(parent);
       current = parent;
     }
     const found = chain.flatMap(validateRelation);
-    if (this.validation === "error" && found.some((i) => i.severity === "error")) {
+    if ((configured || this.validation === "error") && found.some((i) => i.severity === "error")) {
       throw new OperationError(422, "invalid", "Invalid Relation", found);
     }
     issues?.push(...found.map(advisory));
+    if (configured) {
+      if (resource.abstract !== false) return unrelated();
+      const binding = this.configured!.bind(resource);
+      onBinding?.(binding);
+    }
     return resource;
   }
 
-  resolve(canonical: string, context: Artifact[] = [], issues?: FhirObject[], observe?: (r: Artifact) => void): Artifact {
-    return this.checked(this.find(canonical, context) ?? fail(404, "not-found", `Unresolved dependency: ${canonical}`), context, issues, observe);
+  resolve(canonical: string, context: Artifact[] = [], issues?: FhirObject[], observe?: (r: Artifact) => void,
+    onBinding?: (binding: RelationBinding) => void): Artifact {
+    return this.checked(this.find(canonical, context) ?? fail(404, "not-found", `Unresolved dependency: ${canonical}`), context, issues, observe, onBinding);
   }
 
   put(value: unknown, issues?: FhirObject[]): Artifact {

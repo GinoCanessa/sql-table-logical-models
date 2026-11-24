@@ -4,7 +4,7 @@ import { BINARY_CONTENT_MODEL, EXT, RELATION, SOF_RELATION, SQLITE_CONTENT_TYPE,
 import type { Artifact, FhirObject } from "./fhir.js";
 import { modelSettings, sqliteType, stableName } from "./models.js";
 import type { ModelOptions, RelationBinding } from "./models.js";
-import { columnElement, primitives, readRelation, requireValid, unknownResult } from "./relation.js";
+import { columnElement, primitives, readRelation, relationColumns, requireValid, unknownResult } from "./relation.js";
 import type { ColumnFacts } from "./relation.js";
 import { quoteIdentifier as q, sqliteNameKey } from "./schema.js";
 
@@ -21,9 +21,10 @@ export interface Descriptor extends StatementColumnMetadata {
   origin?: string;
 }
 export interface Projection { declaration: FhirObject; binding: RelationBinding }
-export function descriptor(c: StatementColumnMetadata, bindings: RelationBinding[], output?: FhirObject, view?: Projection): Descriptor {
-  const binding = view?.binding ?? bindings.find((b) => c.table && sqliteNameKey(c.table) === sqliteNameKey(b.table));
-  const source = binding && readRelation(binding.model)?.columns.find((col) => view ? col.name === view.declaration.path :
+export function descriptor(c: StatementColumnMetadata, bindings: RelationBinding[], output?: FhirObject, view?: Projection, curated?: RelationBinding): Descriptor {
+  const sameTable = (b: RelationBinding) => c.table && sqliteNameKey(c.table) === sqliteNameKey(b.table);
+  const binding = view?.binding ?? curated ?? bindings.find(sameTable);
+  const source = binding && relationColumns(binding.model).find((col) => view ? col.name === view.declaration.path :
     c.column && sqliteNameKey(col.physicalName) === sqliteNameKey(c.column));
   const physical = source?.primitive ?? (c.type ? sqliteType(c.type).fhir : undefined);
   const declared = view ? view.declaration.type : output?.type;
@@ -41,10 +42,14 @@ export function descriptor(c: StatementColumnMetadata, bindings: RelationBinding
   if (view && source) {
     const path = `${binding!.model.name}.${source.name}`;
     const element = array(object(binding!.model.differential).element, "element").map((e) => object(e)).find((e) => e.path === path);
-    for (const [key, value] of Object.entries(element ?? {})) if (/^(?:minValue|maxValue)/.test(key)) annotations[key] = value;
+    for (const [key, value] of Object.entries(element ?? {})) {
+      if (/^(?:minValue|maxValue)/.test(key) || ["label", "code", "alias", "meaningWhenMissing", "example", "binding", "comment", "requirements"].includes(key) ||
+        (key === "definition" && definition === undefined) || (key === "short" && value !== source.physicalName)) annotations[key] = value;
+    }
   }
-  const sqlTypes = [...source?.sqlTypes ?? []];
-  if (!sqlTypes.length && c.type) sqlTypes.push({ dialect: SQLITE_CONTENT_TYPE, declaredType: c.type });
+  const sqlTypes = (source?.sqlTypes ?? []).filter((s) => !binding?.curated || !c.type ||
+    (s.dialect && s.dialect !== SQLITE_CONTENT_TYPE && s.dialect !== "application/sql"));
+  if (!sqlTypes.some((s) => s.dialect === SQLITE_CONTENT_TYPE) && c.type) sqlTypes.unshift({ dialect: SQLITE_CONTENT_TYPE, declaredType: c.type });
   for (const entry of array(view?.declaration.tag, "column.tag")) {
     const tag = object(entry), match = /^([a-z][a-z0-9-]*)\/type$/i.exec(String(tag.name));
     if (!match) continue;
@@ -74,10 +79,11 @@ function ddlType(facts: ColumnFacts): string {
 }
 export interface Contract { model: Artifact; profileId: string; profileUrl: string; ddl: string }
 export function buildContract(subject: Artifact, dependencies: Artifact[], sources: Artifact[], descriptors: Descriptor[],
-  options: ModelOptions, occupied: Artifact[], snapshots: Artifact[]): Contract {
+  options: ModelOptions, occupied: Artifact[], snapshots: Artifact[], effective: RelationBinding[] = []): Contract {
   const settings = modelSettings(options);
   const base = (options.baseUrl ?? "https://example.org/sql").replace(/\/+$/, "");
-  const key = digest(normalized({ subject, dependencies, sources, descriptors, settings, base }));
+  const curated = effective.filter((b) => b.curated).map((b) => [canonical(b.model), b.table, [...b.columns]]);
+  const key = digest(normalized({ subject, dependencies, sources, descriptors, settings, base, ...(curated.length ? { curated } : {}) }));
   const name = stableName(`${subject.name ?? subject.id}Result`, "Result_");
   for (let n = 0; ; n++) {
     const suffix = (n ? digest(`${key}:${n}`) : key).slice(0, 48);

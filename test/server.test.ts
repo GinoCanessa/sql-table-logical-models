@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createApp } from "../src/server.js";
-import { EXT, RELATION, SOF_RELATION, array, object, sqlLibrary } from "../src/fhir.js";
+import { EXP, EXT, RELATION, SOF_RELATION, array, extension, object, sqlLibrary } from "../src/fhir.js";
 import type { Artifact, FhirObject } from "../src/fhir.js";
 import { checkRows } from "../src/conformance.js";
-import { fixture, serverFixture } from "./helpers.js";
+import { fixture, operatorExamples, serverFixture } from "./helpers.js";
 
 const headers = { "Content-Type": "application/fhir+json" };
 const post = (body: unknown, extra: Record<string, string> = {}) => ({ method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
@@ -216,10 +217,14 @@ test("verify-output catches required NULL in run and export; declared SQLite len
   }
 });
 
-test("each exported subject has an immutable model paired with its bytes after dependency replacement and restart", async (t) => {
-  const setup = await serverFixture(t, { verifyOutput: true });
+test("a pinned clinic client provisions from describe, discovers the same contract and retains each immutable export on restart", async (t) => {
+  const { person, relations, annotations } = operatorExamples();
+  const setup = await serverFixture(t, { verifyOutput: true, relations, annotations });
   let base = setup.base;
-  const dep = sqlLibrary("shared", "SELECT id AS value FROM patient ORDER BY id", [], "sql-view"); dep.version = "1";
+  assert.equal((await fetch(base + "/StructureDefinition/clinic-person", { ...post(person), method: "PUT" })).status, 201);
+  const dep = sqlLibrary("shared", "SELECT person_id AS value, note FROM people JOIN notes ON person_id = patient_id ORDER BY notes.id", [
+    { label: "people", resource: `${person.url}|1` }, { label: "notes", resource: "https://example.org/sql/StructureDefinition/visit" },
+  ], "sql-view"); dep.version = "1";
   setup.store.put(dep);
   const pinned = sqlLibrary("pinned", "SELECT * FROM dep", [{ label: "dep", resource: dep.url + "|1" }]); pinned.version = "2";
   setup.store.put(pinned);
@@ -230,8 +235,31 @@ test("each exported subject has an immutable model paired with its bytes after d
   const describes = await Promise.all(subjects.map(async (subject, i) => await (await fetch(base + "/$sql-describe", post({
     resourceType: "Parameters", parameter: [subject, ...(i ? [context] : [])],
   }))).json() as Artifact));
+  const model = describes[0]!;
+  const ddl = await (await fetch(base + "/$sql-describe", post({ resourceType: "Parameters", parameter: [subjects[0], { name: "_format", valueCode: "sql" }] }))).text();
+  assert.equal(ddl, extension(model, `${EXT}/sql-ddl`)?.valueString);
+  const target = new DatabaseSync(":memory:");
+  try {
+    target.exec(ddl);
+    assert.deepEqual(target.prepare("SELECT name, type FROM pragma_table_info(?) ORDER BY cid").all(String(model.name)).map((c) => [c.name, c.type]),
+      [["value", "INTEGER"], ["note", "TEXT"]]);
+  } finally { target.close(); }
+  const discovery = await (await fetch(base + "/$feature-query", post({ resourceType: "Parameters", parameter: [{ name: "feature", part: [
+    { name: "definition", valueCanonical: `${EXP}/FeatureDefinition/result-model` }, { name: "context", valueString: pinned.url + "|2" },
+  ] }] }))).json();
+  const answer = array(object(array(object(discovery).parameter, "parameter")[0]).part, "part").map((v) => object(v));
+  const canonical = String(answer.find((p) => p.name === "value")?.valueCanonical);
+  assert.equal(canonical, model.url);
+  const discoveryRead = await (await fetch(`${base}/StructureDefinition?url=${encodeURIComponent(canonical)}`)).json();
+  assert.deepEqual(object(array(object(discoveryRead).entry, "entry")[0]).resource, model);
+  const rows = await (await fetch(base + "/$sql-run", post({ resourceType: "Parameters", parameter: [subjects[0], { name: "_format", valueCode: "json" }] }))).json();
+  assert.deepEqual(rows, [{ value: "1", note: "Synthetic visit" }, { value: "1", note: null }, { value: "2", note: null }]);
+  assert.deepEqual(checkRows(model, rows), []);
   const input = { resourceType: "Parameters", parameter: [...subjects.map((s, i) => ({ name: "subject", part: [
     { name: "name", valueString: `file${i}` }, s] })), context, { name: "_format", valueCode: "json" }] };
+  const unmet = await fetch(base + "/$sql-export", post(input, { Prefer: "respond-async", "Required-Features": "param=integer64-json(number)" }));
+  assert.equal(unmet.status, 501); assert.equal(object(await unmet.json()).resourceType, "OperationOutcome");
+  assert.equal(unmet.headers.get("Content-Location"), null);
   const { result, statusUrl } = await exportResult(base, input);
   assert.equal(result.status, 200);
   const outputs = array(object(await result.json()).parameter, "parameter").map((p) => object(p)).filter((p) => p.name === "output");
@@ -244,15 +272,18 @@ test("each exported subject has an immutable model paired with its bytes after d
     const path = new URL(String(fields[1]!.valueUri)).pathname;
     const body = await (await fetch(base + path)).text();
     assert.deepEqual(checkRows(describes[i]!, JSON.parse(body)), []);
+    if (!i) assert.deepEqual(JSON.parse(body), rows);
     return { path, body };
   }));
   const second = await exportResult(base, input);
   assert.equal(second.result.status, 200);
   assert.equal((await fetch(second.statusUrl, { method: "DELETE" })).status, 202);
   setup.store.put({ ...sqlLibrary("shared", "SELECT name AS label FROM patient", [], "sql-view"), version: "1" });
+  setup.store.put({ ...sqlLibrary("pinned", "SELECT label FROM dep ORDER BY label DESC", [{ label: "dep", resource: dep.url + "|1" }]), version: "2" });
   base = await setup.reopen();
   const current = await (await fetch(`${base}/$sql-describe?subjectReference=Library/pinned`)).json() as Artifact;
   assert.notEqual(current.url, describes[0]!.url);
+  assert.deepEqual(array(object(current.differential).element, "element").slice(1).map((e) => object(e).path), [`${current.name}.label`]);
   for (const [i, model] of describes.entries()) {
     assert.deepEqual(await (await fetch(`${base}/StructureDefinition/${model.id}`)).json(), model);
     const search = object(await (await fetch(`${base}/StructureDefinition?url=${encodeURIComponent(model.url!)}`)).json());

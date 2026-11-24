@@ -1,0 +1,23 @@
+[
+  {
+    "resourceType": "StructureDefinition",
+    "extension": [
+      { "url": "https://example.org/sql-table-logical-models/StructureDefinition/sql-name", "valueString": "visit" }
+    ],
+    "description": "Synthetic clinic encounters.",
+    "differential": {
+      "element": [
+        {
+          "path": "visit.note",
+          "label": "Visit note",
+          "definition": "A short note recorded at the encounter.",
+          "code": [{ "system": "urn:example:clinic:columns", "code": "visit-note" }],
+          "alias": ["encounter note"],
+          "meaningWhenMissing": "NULL means no note was recorded.",
+          "example": [{ "label": "Synthetic note", "valueString": "Synthetic visit" }],
+          "binding": { "strength": "example", "valueSet": "urn:example:ValueSet:visit-notes" }
+        }
+      ]
+    }
+  }
+]

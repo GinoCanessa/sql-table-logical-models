@@ -1,4 +1,4 @@
-import { BINARY_CONTENT_MODEL, EXT, OperationError, RELATION, SOF, SOF_RELATION, SQL_CONTENT_TYPE_EXTENSION, SQL_CONTENT_TYPE_SYSTEM, array, extension, object, text } from "./fhir.js";
+import { BINARY_CONTENT_MODEL, EXT, OperationError, RELATION, SOF, SOF_RELATION, SQL_CONTENT_TYPE_SYSTEM, array, extension, object, text } from "./fhir.js";
 import type { Artifact, FhirObject } from "./fhir.js";
 
 export type TypeEncoding = "mapping" | "extension" | "both";
@@ -50,6 +50,10 @@ const record = (v: unknown): v is FhirObject => !!v && typeof v === "object" && 
 const entries = (v: unknown): FhirObject[] => Array.isArray(v) ? v.filter(record) : [];
 const vocabulary = (name: string, url: unknown) => url === `${EXT}/${name}` || url === `${SOF}/StructureDefinition/${name}`;
 const canonicalUri = (v: unknown): v is string => typeof v === "string" && /^[a-z][\w+.-]*:[^\s|]+(?:\|[^\s|]+)?$/i.test(v);
+export function validBinding(primitive: string, binding: FhirObject): boolean {
+  return ["code", "string", "uri"].includes(primitive) && ["required", "extensible", "preferred", "example"].includes(String(binding.strength)) &&
+    canonicalUri(binding.valueSet) && URL.canParse(binding.valueSet.split("|")[0]!);
+}
 
 /** JSON representation, not terminology membership or arbitrary FHIRPath validation. */
 export function primitiveValue(type: string, value: unknown): boolean {
@@ -123,6 +127,10 @@ export function validateRelation(model: Artifact): FhirObject[] {
         error("extension", `Unsupported element extension: ${String(x.url)}`);
       }
     }
+    const physicalNames = entries(e.extension).filter((x) => vocabulary("sql-name", x.url));
+    if (physicalNames.length > 1 || physicalNames.some((x) => typeof x.valueString !== "string" || !x.valueString.length)) {
+      error("extension", "Expected at most one physical column name, a nonempty string");
+    }
     if (!i) {
       if ((e.min !== undefined && e.min !== 0) || (e.max !== undefined && e.max !== "*")) error("min", "Root cardinality must be 0..*");
       if (entries(e.mapping).some((m) => m.identity === "sql")) error("mapping", "No root SQL mapping");
@@ -169,8 +177,7 @@ export function validateRelation(model: Artifact): FhirObject[] {
     if ("maxLength" in e && (!stringLike.has(primitive) || typeof e.maxLength !== "number" || !Number.isSafeInteger(e.maxLength) || e.maxLength < 0)) error("maxLength", "Length requires a string-like type and nonnegative integer");
     if (e.binding !== undefined) {
       const b = record(e.binding) ? e.binding : {};
-      if (!["code", "string", "uri"].includes(primitive) || !["required", "extensible", "preferred", "example"].includes(String(b.strength)) ||
-        !canonicalUri(b.valueSet)) error("binding", "Binding requires an applicable primitive, strength and ValueSet canonical");
+      if (!validBinding(primitive, b)) error("binding", "Binding requires an applicable primitive, strength and ValueSet canonical");
     }
   });
   for (const [path, key] of conditions) if (!keys.has(String(key))) report(path, "condition must reference a local constraint key");
@@ -186,22 +193,16 @@ function draftExtension(value: FhirObject, name: string) {
   return extension(value, `${EXT}/${name}`) ?? extension(value, `${SOF}/StructureDefinition/${name}`);
 }
 
-/** Interpret a direct Relation without normalizing or dereferencing the stored resource. */
-export function readRelation(model: Artifact): { columns: ColumnFacts[]; issues: FhirObject[] } | undefined {
-  if (model.resourceType !== "StructureDefinition" || !hasRelationBase(model)) return undefined;
-  const issues: FhirObject[] = [];
-  if (draftExtension(model, "relation-source")) issues.push({
-    severity: "information", code: "informational", diagnostics: "relation-source retained; no data is fetched or bound.",
-    expression: ["StructureDefinition.extension"],
-  });
-  const dialectCoding = extension(model, SQL_CONTENT_TYPE_EXTENSION)?.valueCoding;
+/** Interpret columns after Relation ancestry has been established. */
+export function relationColumns(model: Artifact): ColumnFacts[] {
+  const dialectCoding = draftExtension(model, "sql-content-type")?.valueCoding;
   const dialect = dialectCoding && object(dialectCoding).code;
   const differential = model.differential === undefined ? {} : object(model.differential);
   const elements = array(differential.element, "differential.element").map((e) => object(e));
-  const columns = elements.slice(1).map((element): ColumnFacts => {
+  return elements.slice(1).map((element): ColumnFacts => {
     const path = text(element.path, "column.path");
     const name = path.slice(path.lastIndexOf(".") + 1);
-    const physical = extension(element, `${EXT}/sql-name`)?.valueString;
+    const physical = draftExtension(element, "sql-name")?.valueString;
     const typeEntry = array(element.type, "column.type")[0];
     const type = typeEntry === undefined ? {} : object(typeEntry);
     const sqlTypes: ColumnFacts["sqlTypes"] = [];
@@ -213,7 +214,7 @@ export function readRelation(model: Artifact): { columns: ColumnFacts[]; issues:
       if (m.identity === "sql") add(m.map, m.language ?? dialect);
     }
     for (const e of array(type.extension, "type.extension").map((v) => object(v))) {
-      if (e.url !== `${EXT}/sql-type`) continue;
+      if (!vocabulary("sql-type", e.url)) continue;
       const coding = extension(e, "dialect")?.valueCoding;
       add(extension(e, "type")?.valueString, coding && object(coding).code);
     }
@@ -229,5 +230,15 @@ export function readRelation(model: Artifact): { columns: ColumnFacts[]; issues:
       ...(typeof position === "number" ? { primaryKeyPosition: position } : {}),
     };
   });
-  return { columns, issues };
+}
+
+/** Interpret a direct Relation without normalizing or dereferencing the stored resource. */
+export function readRelation(model: Artifact): { columns: ColumnFacts[]; issues: FhirObject[] } | undefined {
+  if (model.resourceType !== "StructureDefinition" || !hasRelationBase(model)) return undefined;
+  const issues: FhirObject[] = [];
+  if (draftExtension(model, "relation-source")) issues.push({
+    severity: "information", code: "informational", diagnostics: "relation-source retained; no data is fetched or bound.",
+    expression: ["StructureDefinition.extension"],
+  });
+  return { columns: relationColumns(model), issues };
 }

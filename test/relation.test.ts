@@ -43,7 +43,7 @@ test("all generated Relations validate, while forbidden fields and incomplete ta
 });
 
 test("validate a Relation descendant at write and at resolution without changing prior contents", async (t) => {
-  const { base, store } = await serverFixture(t, { relationValidation: "error" });
+  const { base, store } = await serverFixture(t);
   const parent = draft();
   const put = (r: Artifact) => fetch(`${base}/StructureDefinition/${r.id}`, { ...postBody(r), method: "PUT" });
   assert.equal((await put(parent)).status, 201);
@@ -70,7 +70,7 @@ test("validate a Relation descendant at write and at resolution without changing
   assert.equal((await put(unrelated)).status, 201);
   const context: FhirObject[] = [{ name: "context", resource: invalid }, { name: "subjectResource", resource: query }];
   assert.match(await (await fetch(`${base}/$sql-describe`, postBody({ resourceType: "Parameters", parameter: context }))).text(), /defaultValueInteger64/);
-  const warn = await serverFixture(t);
+  const warn = await serverFixture(t, { relationValidation: "warn" });
   const response = await fetch(warn.base + "/StructureDefinition", postBody({ ...invalid, baseDefinition: SOF_RELATION }, { Prefer: "return=OperationOutcome" }));
   assert.equal(response.status, 201);
   assert.equal(response.headers.get("X-Relation-Issue-Count"), "1");
