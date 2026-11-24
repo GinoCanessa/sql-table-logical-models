@@ -26,7 +26,11 @@ export function descriptor(c: StatementColumnMetadata, bindings: RelationBinding
   const binding = view?.binding ?? curated ?? bindings.find(sameTable);
   const source = binding && relationColumns(binding.model).find((col) => view ? col.name === view.declaration.path :
     c.column && sqliteNameKey(col.physicalName) === sqliteNameKey(c.column));
-  const physical = source?.primitive ?? (c.type ? sqliteType(c.type).fhir : undefined);
+  // A generated primitive without a declared SQLite type is only an authoring hint.
+  const modeled = binding?.curated || source?.sqlTypes.some((s) => s.dialect === SQLITE_CONTENT_TYPE && s.declaredType.trim()) ?
+    source?.primitive : undefined;
+  const preparedType = c.type?.trim() ? c.type : undefined;
+  const physical = modeled ?? (preparedType && sqliteType(preparedType).fhir);
   const declared = view ? view.declaration.type : output?.type;
   if (declared !== undefined && !primitives.has(String(declared))) fail(422, "not-supported", `Non-primitive output type for ${c.name}: ${String(declared)}`);
   if (declared !== undefined && (typeof declared !== "string" || (physical && physical !== declared))) {
@@ -43,13 +47,15 @@ export function descriptor(c: StatementColumnMetadata, bindings: RelationBinding
     const path = `${binding!.model.name}.${source.name}`;
     const element = array(object(binding!.model.differential).element, "element").map((e) => object(e)).find((e) => e.path === path);
     for (const [key, value] of Object.entries(element ?? {})) {
-      if (/^(?:minValue|maxValue)/.test(key) || ["label", "code", "alias", "meaningWhenMissing", "example", "binding", "comment", "requirements"].includes(key) ||
+      const typeSpecific = /^(?:minValue|maxValue)/.test(key) || key === "example" || key === "binding";
+      if ((typeSpecific && primitive === source.primitive) || (key === "comment" && modeled) ||
+        ["label", "code", "alias", "meaningWhenMissing", "requirements"].includes(key) ||
         (key === "definition" && definition === undefined) || (key === "short" && value !== source.physicalName)) annotations[key] = value;
     }
   }
-  const sqlTypes = (source?.sqlTypes ?? []).filter((s) => !binding?.curated || !c.type ||
-    (s.dialect && s.dialect !== SQLITE_CONTENT_TYPE && s.dialect !== "application/sql"));
-  if (!sqlTypes.some((s) => s.dialect === SQLITE_CONTENT_TYPE) && c.type) sqlTypes.unshift({ dialect: SQLITE_CONTENT_TYPE, declaredType: c.type });
+  const sqlTypes = (source?.sqlTypes ?? []).filter((s) => s.declaredType.trim() && (!binding?.curated || !preparedType ||
+    (s.dialect && s.dialect !== SQLITE_CONTENT_TYPE && s.dialect !== "application/sql")));
+  if (preparedType && !sqlTypes.some((s) => s.dialect === SQLITE_CONTENT_TYPE)) sqlTypes.unshift({ dialect: SQLITE_CONTENT_TYPE, declaredType: preparedType });
   for (const entry of array(view?.declaration.tag, "column.tag")) {
     const tag = object(entry), match = /^([a-z][a-z0-9-]*)\/type$/i.exec(String(tag.name));
     if (!match) continue;

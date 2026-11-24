@@ -7,6 +7,8 @@ import { createApp } from "../src/server.js";
 import { EXP, EXT, RELATION, SOF_RELATION, array, extension, object, sqlLibrary } from "../src/fhir.js";
 import type { Artifact, FhirObject } from "../src/fhir.js";
 import { checkRows } from "../src/conformance.js";
+import { ExportJobs } from "../src/exports.js";
+import { readRelation } from "../src/relation.js";
 import { fixture, operatorExamples, serverFixture } from "./helpers.js";
 
 const headers = { "Content-Type": "application/fhir+json" };
@@ -173,6 +175,75 @@ c'),(9223372036854775807,NULL,NULL);`);
     for (const name of ["exportStartTime", "exportEndTime"]) assert.ok(Number.isFinite(Date.parse(String(parts.find((p) => p.name === name)?.valueInstant))));
     for (const response of [run, file]) assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(expected));
   }
+});
+
+test("verified JSON run and download distinguish mixed storage from a declared integer64 projection", async (t) => {
+  const { base } = await serverFixture(t, { verifyOutput: true },
+    "CREATE TABLE readings(v); INSERT INTO readings VALUES (7), ('text'), (NULL)");
+  const mixed = sqlLibrary("mixed", "SELECT v AS reading FROM readings ORDER BY rowid", []);
+  const numeric = sqlLibrary("numeric", "SELECT v AS reading FROM readings WHERE rowid = 1", []);
+  numeric.parameter = [{ name: "reading", use: "out", type: "integer64" }];
+  for (const [query, primitive, values] of [[mixed, undefined, [7, "text", null]], [numeric, "integer64", ["7"]]] as const) {
+    const subject = { name: "subjectResource", resource: query };
+    const format = { name: "_format", valueCode: "json" };
+    const describe = await fetch(`${base}/$sql-describe`, post({ resourceType: "Parameters", parameter: [subject] }));
+    assert.equal(describe.status, 200);
+    const model = await describe.json() as Artifact;
+    assert.equal(readRelation(model)!.columns[0]!.primitive, primitive);
+    const run = await fetch(`${base}/$sql-run`, post({ resourceType: "Parameters", parameter: [subject, format] }));
+    const { file, modelUrl } = await completedExport(base, { resourceType: "Parameters", parameter: [{ name: "subject", part: [subject] }, format] });
+    assert.equal(modelUrl, model.url);
+    assert.deepEqual(await (await fetch(`${base}/StructureDefinition/${model.id}`)).json(), model);
+    for (const response of [run, file]) {
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("X-Relation-Issue-Count"), primitive ? null : "1");
+      const rows = await response.json() as FhirObject[];
+      assert.deepEqual(rows, values.map((reading) => ({ reading })));
+      const issues = checkRows(model, rows);
+      assert.deepEqual(issues.map((i) => [i.severity, i.diagnostics]), primitive ? [] : [["information", "Partial typing: reading is unknown"]]);
+    }
+  }
+});
+
+test("standalone, nested and context-replaced SQLViews reject the same invalid outputs before export kickoff", async (t) => {
+  const { base, store } = await serverFixture(t);
+  const start = t.mock.method(ExportJobs.prototype, "start");
+  const valid = sqlLibrary("declared-id", "SELECT id FROM patient", [], "sql-view");
+  valid.version = "1";
+  valid.parameter = [{ name: "id", use: "out", type: "integer64" }];
+  const middle = sqlLibrary("middle", "SELECT id AS patient_id FROM src", [{ label: "src", resource: `${valid.url}|1` }], "sql-view");
+  middle.parameter = [{ name: "patient_id", use: "out", type: "integer64" }];
+  store.put(middle);
+  const root = sqlLibrary("consumer", "SELECT patient_id FROM mid ORDER BY patient_id", [{ label: "mid", resource: middle.url! }]);
+  const reject = async (resource: Artifact, diagnostics: string, replacement?: Artifact) => {
+    const subject = { name: "subjectResource", resource };
+    for (const operation of ["describe", "run", "export"]) {
+      const exporting = operation === "export";
+      const input = { resourceType: "Parameters", parameter: [exporting ? { name: "subject", part: [subject] } : subject,
+        ...(replacement ? [{ name: "context", resource: replacement }] : [])] };
+      const response = await fetch(`${base}/$sql-${operation}`, post(input, exporting ? { Prefer: "respond-async" } : {}));
+      assert.equal(response.status, 422);
+      assert.equal(response.headers.get("Content-Location"), null);
+      assert.deepEqual(await response.json(), { resourceType: "OperationOutcome", issue: [{ severity: "error", code: "invalid", diagnostics }] });
+    }
+  };
+  for (const [name, type, reason] of [
+    ["patient_key", "integer64", "Missing declared output column: patient_key"],
+    ["id", "boolean", "Conflicting primitive for id: boolean vs integer64"],
+  ] as const) {
+    const bad = { ...valid, parameter: [{ name, use: "out", type }] };
+    store.put(bad);
+    await reject(bad, reason);
+    await reject(root, reason);
+    store.put(valid);
+    const run = await fetch(`${base}/$sql-run`, post({ resourceType: "Parameters", parameter: [
+      { name: "subjectResource", resource: root }, { name: "_format", valueCode: "json" },
+    ] }));
+    assert.equal(run.status, 200);
+    assert.deepEqual(await run.json(), [{ patient_id: "1" }, { patient_id: "2" }]);
+    await reject(root, reason, bad);
+  }
+  assert.equal(start.mock.callCount(), 0);
 });
 
 test("verify-output catches required NULL in run and export; declared SQLite length is a nonfatal row warning", async (t) => {

@@ -91,13 +91,16 @@ test("row caps, zero limits, empty result columns, BLOBs and large integers reta
 test("prepared origins survive aliases and output declarations are not input placeholders", (t) => {
   const { engine } = fixture(t);
   const view = sqlLibrary("declared", "SELECT id AS original FROM patient", [], "sql-view");
+  view.version = "1";
   view.parameter = [{ use: "out", name: "original", type: "integer64" }];
-  const subject = sqlLibrary("mixed", "SELECT original AS alias, :n + 1 AS expr, 1 AS unknown FROM dep ORDER BY alias", [
-    { label: "dep", resource: view.url! },
+  const subject = sqlLibrary("mixed", "SELECT dep.original AS alias, :n + 1 AS expr, 1 AS unknown FROM dep JOIN again USING (original) ORDER BY alias", [
+    { label: "dep", resource: view.url! }, { label: "again", resource: `${view.url}|1` },
   ]);
   subject.parameter = [{ use: "out", name: "expr", type: "integer64" }, { use: "in", name: "n", type: "integer" }];
   const parameters = { resourceType: "Parameters", parameter: [{ name: "n", valueInteger: 4 }] };
+  const prepare = t.mock.method(DatabaseSync.prototype, "prepare");
   const result = engine.runPreparedBatch([{ subject, parameters }], { context: [view], limit: 0 })[0]!;
+  assert.equal(prepare.mock.calls.filter((call) => call.arguments[0] === extractSql(view)).length, 1);
   assert.deepEqual(result.descriptors.map(({ name, table, column, type, primitive }) => [name, table, column, type, primitive]), [
     ["alias", "patient", "id", "INTEGER", "integer64"], ["expr", null, null, null, "integer64"], ["unknown", null, null, null, undefined],
   ]);
@@ -107,7 +110,20 @@ test("prepared origins survive aliases and output declarations are not input pla
   assert.throws(() => engine.run(outputOnly), /not declared/);
   assert.throws(() => engine.run(outputOnly, { parameters }), /Undeclared query parameter/);
   const implicit = sqlLibrary("declared", "SELECT :n AS original", [], "sql-view");
+  implicit.version = "1";
   assert.throws(() => engine.describe(subject, { context: [implicit] }), /dependency placeholders/);
+});
+
+test("an outer projection cannot hide duplicate logical names or an unsupported cardinality", (t) => {
+  const { engine } = fixture(t);
+  const duplicate = sqlLibrary("duplicate", "SELECT id AS key, name AS KEY FROM patient", [], "sql-view");
+  const cardinality = sqlLibrary("cardinality", "SELECT id AS key FROM patient", [], "sql-view");
+  cardinality.parameter = [{ name: "key", use: "out", type: "integer64", max: "2" }];
+  for (const [view, reason] of [[duplicate, /Duplicate output column names/], [cardinality, /Unsupported output cardinality: key/]] as const) {
+    const subject = sqlLibrary("consumer", "SELECT key FROM src", [{ label: "src", resource: view.url! }]);
+    assert.throws(() => engine.describe(view), reason);
+    assert.throws(() => engine.describe(subject, { context: [view] }), reason);
+  }
 });
 
 test("a batch holds a single SQLite snapshot when another connection changes the source between subjects", (t) => {

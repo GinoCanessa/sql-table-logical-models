@@ -81,6 +81,36 @@ test("projection and Library nullability differ; returned DDL provisions only th
   assert.equal(await (await fetch(ref + "csv")).text(), "patient_id,patient_name,active\r\n1,Example One,1\r\n2,Example Two,0\r\n");
 });
 
+test("an undeclared source retains its origin, not the generated table's string hint", (t) => {
+  const { engine } = fixture(t, 100, "CREATE TABLE readings(v); INSERT INTO readings VALUES (7), ('text'), (NULL)");
+  const table = engine.bindings.find((b) => b.table === "readings")!.model;
+  const hint = readRelation(table)!.columns[0]!;
+  assert.equal(hint.primitive, "string");
+  assert.match(hint.warning!, /authoring hint/);
+  assert.deepEqual(hint.sqlTypes, []);
+  const column = { name: "reading", path: "v" };
+  const view: Artifact = { resourceType: "ViewDefinition", id: "readings-projection", resource: table.name,
+    extension: [{ url: `${EXT}/source`, valueCanonical: table.url }], select: [{ column: [column] }] };
+  const query = sqlLibrary("readings", "SELECT v AS reading FROM readings ORDER BY rowid", []);
+  for (const subject of [query, view]) {
+    const { model, ddl } = engine.describe(subject);
+    assert.deepEqual(validateRelation(model), []);
+    const leaf = leaves(model)[0]!;
+    assert.equal(extension(leaf, `${EXT}/origin`)?.valueUri, `${table.url}#readings.v`);
+    assert.deepEqual([leaf.short, leaf.min, leaf.max], ["reading", 0, "1"]);
+    assert.match(String(leaf.comment), /Unknown result type/);
+    assert.equal(leaf.type, undefined);
+    assert.equal(leaf.mapping, undefined);
+    assert.deepEqual(readRelation(model)!.columns[0]!.sqlTypes, []);
+    assert.match(ddl, /\(\s*"reading"\s*\)$/);
+  }
+  view.select = [{ column: [{ ...column, type: "integer64" }] }];
+  const declared = engine.describe(view).model;
+  assert.deepEqual(validateRelation(declared), []);
+  assert.equal(readRelation(declared)!.columns[0]!.primitive, "integer64");
+  assert.equal(leaves(declared)[0]!.comment, undefined);
+});
+
 test("tags, collection and documentation survive a direct projection; contradictions fail describe", async (t) => {
   const { base } = await serverFixture(t, { verifyOutput: true });
   const v = sample("patient-projection");

@@ -26,6 +26,13 @@ interface BatchSubject { subject: Artifact; parameters?: FhirObject }
 interface BatchOptions { context?: Artifact[]; limit?: number }
 
 interface BoundSource { binding: RelationBinding; sql: string }
+interface OutputStatement { sql: string; outputs: Map<string, FhirObject>; projections?: Map<string, Projection> }
+interface CompileContext {
+  lookup(canonical: string): Artifact;
+  sourceFor(model: Artifact): BoundSource;
+  projections: Map<string, Projection>;
+  views: Map<string, OutputStatement>;
+}
 
 export interface ExecutionOptions {
   context?: Artifact[];
@@ -251,8 +258,9 @@ export class QueryEngine {
     if (!Number.isSafeInteger(maxRows) || maxRows < 1) throw new Error("maxRows must be a positive safe integer");
   }
 
-  private compile(resource: Artifact, lookup: (canonical: string) => Artifact, stack: Set<string>, projections: Map<string, Projection>,
-    sourceFor: (model: Artifact) => BoundSource, dependency = false): string {
+  private compile(resource: Artifact, context: CompileContext, stack: Set<string>): string {
+    const { lookup, projections, sourceFor, views } = context;
+    const dependency = stack.size !== 0;
     const key = `${resource.resourceType}/${resource.url ?? resource.id}|${resource.version ?? ""}`;
     if (stack.has(key)) fail(422, "invalid", `Dependency cycle: ${[...stack, key].join(" -> ")}`);
     if (stack.size >= 32) fail(422, "too-costly", "Dependency depth exceeds 32");
@@ -299,7 +307,8 @@ export class QueryEngine {
     if (resource.resourceType !== "Library") fail(422, "not-supported", "Unsupported execution subject");
     const kind = libraryKind(resource);
     if (dependency && kind !== "sql-view") fail(422, "invalid", "Only SQLView Libraries may be used as dependencies");
-    if (dependency && declarations(resource).inputs.length) fail(422, "not-supported", "Parameterized SQLView dependencies are not implemented");
+    const declared = dependency ? declarations(resource) : undefined;
+    if (declared?.inputs.length) fail(422, "not-supported", "Parameterized SQLView dependencies are not implemented");
     const labels = new Set<string>();
     const ctes: string[] = [];
     for (const value of array(resource.relatedArtifact, "Library.relatedArtifact")) {
@@ -309,11 +318,13 @@ export class QueryEngine {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(label) || labels.has(label.toLowerCase())) fail(422, "invalid", `Invalid or duplicate dependency label: ${label}`);
       labels.add(label.toLowerCase());
       const target = lookup(text(dep.resource, "dependency canonical"));
-      ctes.push(`${q(label)} AS (${this.compile(target, lookup, next, projections, sourceFor, true)})`);
+      ctes.push(`${q(label)} AS (${this.compile(target, context, next)})`);
     }
     const sql = extractSql(resource);
     if (dependency && parameterNames(sql).size) fail(422, "not-supported", "SQLView dependency placeholders are not supported");
-    return ctes.length ? `WITH ${ctes.join(", ")} SELECT * FROM (${sql})` : sql;
+    const compiled = ctes.length ? `WITH ${ctes.join(", ")} SELECT * FROM (${sql})` : sql;
+    if (declared && !views.has(key)) views.set(key, { sql: compiled, outputs: declared.outputs });
+    return compiled;
   }
 
   run(subject: Artifact, options: ExecutionOptions = {}): QueryResult {
@@ -369,21 +380,23 @@ export class QueryEngine {
         return { binding, sql: `WITH ${q(scope)} AS (SELECT ${columns} FROM ${table}) SELECT ${[...binding.columns.keys()].map(q).join(", ")} FROM ${q(scope)}` };
       };
       if (subject.resourceType !== "Library" && subject.resourceType !== "ViewDefinition") fail(422, "not-supported", "Execution subjects must be Library or ViewDefinition");
-      const sql = this.compile(subject, (c) => {
+      const views = new Map<string, OutputStatement>();
+      const lookup = (c: string) => {
         const prior = resolved.get(c);
         if (prior) return prior;
         const r = this.catalog.resolve(c, context, issues, observe, (b) => effective.set(b.model, b));
         resolved.set(c, r);
         observe(r);
         return r;
-      }, new Set(), projections, sourceFor);
+      };
+      const sql = this.compile(subject, { lookup, projections, sourceFor, views }, new Set());
       if (supplied && subject.resourceType !== "Library") fail(400, "invalid", "Query parameters apply only to Library subjects");
       const { inputs, outputs } = declarations(subject);
       const bindings = metadataOnly ? undefined : bind(inputs, supplied);
       for (const name of parameterNames(sql)) {
         if (!inputs.some((p) => `:${p.name}` === name)) fail(422, "invalid", `SQL parameter is not declared: ${name}`);
       }
-      return { subject, sql, bindings, outputs, graph, projections, effective: [...effective.values()], sourceScopes, issues };
+      return { subject, sql, bindings, outputs, graph, projections, views, effective: [...effective.values()], sourceScopes, issues };
     });
     for (const resource of context) {
       if (!used.has(resource)) fail(400, "invalid", `Context artifact did not match a dependency: ${resource.url}`);
@@ -411,19 +424,28 @@ export class QueryEngine {
           constants.SQLITE_OK : constants.SQLITE_DENY;
       });
       const occupied = this.catalog.list(), snapshots = this.snapshots();
-      return compiled.map(({ subject, sql, bindings, outputs, graph, projections, effective, sourceScopes, issues }) => {
-        reads.clear(); origins.clear();
-        const statement = db.prepare(sql);
-        const descriptors = statement.columns().map((c) => {
-          const scopes = origins.get(sqliteNameKey(`${c.table}\0${c.column}`));
-          const sources = new Set([...scopes ?? []].map((s) => s ? sourceScopes.get(s) : undefined));
-          const source = sources.size === 1 ? [...sources][0] : undefined;
-          return descriptor(c, this.bindings, outputs.get(c.name), projections.get(c.name), source);
-        });
-        const columns = descriptors.map((c) => c.name);
-        if (!columns.length) fail(422, "invalid", "Subject must be a row-producing read-only query");
-        if (new Set(columns).size !== columns.length) fail(422, "invalid", "Duplicate output column names; use explicit SQL aliases");
-        for (const name of outputs.keys()) if (!columns.includes(name)) fail(422, "invalid", `Missing declared output column: ${name}`);
+      return compiled.map((root) => {
+        const { subject, bindings, graph, effective, sourceScopes, issues } = root;
+        const prepare = ({ sql, outputs, projections }: OutputStatement) => {
+          reads.clear(); origins.clear();
+          const statement = db.prepare(sql);
+          const descriptors = statement.columns().map((c) => {
+            const scopes = origins.get(sqliteNameKey(`${c.table}\0${c.column}`));
+            const sources = new Set([...scopes ?? []].map((s) => s ? sourceScopes.get(s) : undefined));
+            const source = sources.size === 1 ? [...sources][0] : undefined;
+            return descriptor(c, this.bindings, outputs.get(c.name), projections?.get(c.name), source);
+          });
+          const columns = descriptors.map((c) => c.name);
+          if (!columns.length) fail(422, "invalid", "Subject must be a row-producing read-only query");
+          if (new Set(descriptors.map((c) => c.facts.name.toLowerCase())).size !== columns.length) {
+            fail(422, "invalid", "Duplicate output column names; use explicit SQL aliases");
+          }
+          for (const name of outputs.keys()) if (!columns.includes(name)) fail(422, "invalid", `Missing declared output column: ${name}`);
+          return { statement, descriptors };
+        };
+        // Postorder insertion puts each view after its dependencies. Only the root is executed.
+        for (const view of root.views.values()) prepare(view);
+        const { statement, descriptors } = prepare(root);
         const sources = this.bindings.filter((b) => reads.has(sqliteNameKey(b.table))).map((b) => b.model);
         const contract = buildContract(subject, [...graph.values()], sources, descriptors, this.settings, occupied, snapshots, effective);
         const rows: PreparedResult["rows"] = [];
